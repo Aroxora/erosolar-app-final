@@ -285,7 +285,25 @@ function addMessageView(msg) {
     content.className = "content";
     content.textContent = msg.content;
     body.appendChild(content);
+    addCopyButton(body, () => msg.content);
   } else {
+    msg._body = body;
+
+    // Reasoning log — collapsible, ABOVE the answer. Open and live while
+    // running (its streamed content is the "what it's doing" display); collapses
+    // to a quiet toggle once the answer is complete.
+    const det = document.createElement("details");
+    det.className = "reasoning";
+    const sum = document.createElement("summary");
+    const rbody = document.createElement("div");
+    rbody.className = "reasoning-body";
+    det.appendChild(sum);
+    det.appendChild(rbody);
+    body.appendChild(det);
+    msg._reasonDetails = det;
+    msg._reasonSummary = sum;
+    msg._reasonBody = rbody;
+
     const content = document.createElement("div");
     content.className = "content";
     body.appendChild(content);
@@ -296,19 +314,16 @@ function addMessageView(msg) {
     body.appendChild(sources);
     msg._sourcesEl = sources;
 
-    msg._body = body;
-
     if (msg.streaming) {
-      buildLivePanel(msg);
-      updateLiveLabel(msg, msg.activityLabel || "Thinking");
-      if (msg.reasoning) {
-        msg._liveReasonEl.textContent = msg.reasoning;
-        msg._liveReasonEl.scrollTop = msg._liveReasonEl.scrollHeight;
-      }
+      det.open = true;
+      det.classList.add("running");
+      setReasonSummary(msg, msg.activityLabel || "Reasoning", true);
+      rbody.textContent = msg.reasoning || "";
+      rbody.scrollTop = rbody.scrollHeight;
+      updateReasonVisibility(msg);
+      paintAssistant(msg); // render any answer already streamed (re-attach case)
     } else {
-      paintAssistant(msg);
-      renderSources(msg);
-      finalizeReasoning(msg);
+      finalizeAssistant(msg);
     }
   }
 
@@ -320,41 +335,51 @@ function addMessageView(msg) {
 }
 
 function paintAssistant(msg) {
-  msg._contentEl.innerHTML = renderMarkdown(msg.content);
+  if (!msg._contentEl) return;
+  const caret = msg.streaming && msg.content ? '<span class="caret"></span>' : "";
+  msg._contentEl.innerHTML = renderMarkdown(msg.content) + caret;
   msg._contentEl.querySelectorAll("a").forEach((a) => {
     a.target = "_blank";
     a.rel = "noopener noreferrer";
   });
 }
 
-// ---- live "thinking" panel: shows what is being thought + current activity ----
-function buildLivePanel(msg) {
-  const live = document.createElement("div");
-  live.className = "live";
-  const head = document.createElement("div");
-  head.className = "live-head";
-  head.innerHTML = '<span class="spinner" aria-hidden="true"></span><span class="live-label"></span>';
-  const reason = document.createElement("div");
-  reason.className = "live-reason";
-  live.appendChild(head);
-  live.appendChild(reason);
-  // Live panel sits above the (still-empty) answer.
-  msg._body.insertBefore(live, msg._contentEl);
-  msg._liveEl = live;
-  msg._liveLabelEl = head.querySelector(".live-label");
-  msg._liveReasonEl = reason;
+// Stream the answer live, rAF-throttled, for the on-screen message.
+let rafPending = false;
+let rafMsg = null;
+function scheduleContentRender(msg) {
+  rafMsg = msg;
+  if (rafPending) return;
+  rafPending = true;
+  requestAnimationFrame(() => {
+    rafPending = false;
+    const m = rafMsg;
+    if (m && m._contentEl && state.activeId === m.convId) {
+      paintAssistant(m);
+      scrollToBottom(false);
+    }
+  });
 }
-function updateLiveLabel(msg, label) {
-  if (msg._liveLabelEl) msg._liveLabelEl.textContent = label;
+
+// ---- reasoning log helpers ----
+function setReasonSummary(msg, label, withSpinner) {
+  if (!msg._reasonSummary) return;
+  msg._reasonSummary.innerHTML = withSpinner
+    ? '<span class="spinner" aria-hidden="true"></span><span class="r-label"></span>'
+    : '<span class="r-label"></span>';
+  msg._reasonSummary.querySelector(".r-label").textContent = label;
 }
-function appendLiveReason(msg, delta) {
-  if (!msg._liveReasonEl || !delta) return;
-  msg._liveReasonEl.textContent += delta;
-  msg._liveReasonEl.scrollTop = msg._liveReasonEl.scrollHeight;
+function appendReason(msg, delta) {
+  if (!msg._reasonBody || !delta) return;
+  msg._reasonBody.textContent += delta;
+  msg._reasonBody.scrollTop = msg._reasonBody.scrollHeight;
 }
-function removeLivePanel(msg) {
-  if (msg._liveEl && msg._liveEl.parentNode) msg._liveEl.parentNode.removeChild(msg._liveEl);
-  msg._liveEl = msg._liveLabelEl = msg._liveReasonEl = null;
+function updateReasonVisibility(msg) {
+  if (!msg._reasonDetails) return;
+  const hasText = (msg.reasoning || "").trim().length > 0;
+  // While running, always show it (summary carries live status); once final,
+  // keep it only if there were actual thoughts to reveal.
+  msg._reasonDetails.hidden = msg.streaming ? false : !hasText;
 }
 
 function renderSources(msg) {
@@ -377,30 +402,52 @@ function renderSources(msg) {
   });
 }
 
-// Subtle collapsed reasoning toggle for the finished message.
-function finalizeReasoning(msg) {
-  if (!msg._body || msg._reasoningBuilt) return;
-  const text = (msg.reasoning || "").trim();
-  if (!text) return;
-  msg._reasoningBuilt = true;
-  const det = document.createElement("details");
-  det.className = "reasoning";
-  const sum = document.createElement("summary");
-  sum.textContent = "Reasoning";
-  const bodyEl = document.createElement("div");
-  bodyEl.className = "reasoning-body";
-  bodyEl.textContent = text;
-  det.appendChild(sum);
-  det.appendChild(bodyEl);
-  msg._body.appendChild(det);
+// ---- copy to clipboard ----
+const COPY_ICON =
+  '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+function addCopyButton(body, getText) {
+  const row = document.createElement("div");
+  row.className = "msg-actions";
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "copy-btn";
+  btn.innerHTML = COPY_ICON + "<span>Copy</span>";
+  const label = btn.querySelector("span");
+  btn.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(getText() || "");
+      btn.classList.add("copied");
+      label.textContent = "Copied";
+    } catch {
+      label.textContent = "Copy failed";
+    }
+    setTimeout(() => {
+      btn.classList.remove("copied");
+      label.textContent = "Copy";
+    }, 1500);
+  });
+  row.appendChild(btn);
+  body.appendChild(row);
+}
+function addAssistantCopy(msg) {
+  if (!msg._body || msg._copyAdded) return;
+  msg._copyAdded = true;
+  addCopyButton(msg._body, () => msg.content);
 }
 
-// Render the finished answer (the one useful part), exactly once.
+// Finalize the assistant turn: collapse the reasoning log (still above the
+// answer), ensure the full answer + sources are rendered, add the copy button.
 function finalizeAssistant(msg) {
-  removeLivePanel(msg);
+  if (msg._reasonDetails) {
+    msg._reasonDetails.open = false;
+    msg._reasonDetails.classList.remove("running");
+  }
+  if (msg._reasonBody) msg._reasonBody.textContent = (msg.reasoning || "").trim();
+  setReasonSummary(msg, "Reasoning", false);
+  updateReasonVisibility(msg);
   paintAssistant(msg);
   renderSources(msg);
-  finalizeReasoning(msg);
+  addAssistantCopy(msg);
 }
 
 // ---------------------------------------------------------------------------
@@ -437,7 +484,7 @@ async function sendMessage(text) {
     sources: [],
     streaming: true,
     convId,
-    activityLabel: "Thinking",
+    activityLabel: "Reasoning",
   };
   const run = { convId, userMsg, aMsg };
   state.runs.set(convId, run);
@@ -515,12 +562,13 @@ function handleEvent(run, ev) {
   const visible = state.activeId === run.convId; // only touch the DOM when on screen
   switch (ev.type) {
     case "reasoning":
-      // Show what's being thought, live.
+      // The streamed reasoning log IS the live display (no "Thinking" placeholder).
       msg.reasoning += ev.delta || "";
-      msg.activityLabel = "Thinking";
+      msg.activityLabel = "Reasoning";
       if (visible) {
-        updateLiveLabel(msg, "Thinking");
-        appendLiveReason(msg, ev.delta || "");
+        setReasonSummary(msg, "Reasoning", true);
+        appendReason(msg, ev.delta || "");
+        updateReasonVisibility(msg);
       }
       break;
     case "tool":
@@ -530,13 +578,16 @@ function handleEvent(run, ev) {
             ? `Searching · ${truncate(ev.query, 56)}`
             : "Searching the web"
           : "Reading results";
-      if (visible) updateLiveLabel(msg, msg.activityLabel);
+      if (visible) setReasonSummary(msg, msg.activityLabel, true);
       break;
     case "content":
-      // Accumulate silently; the answer is rendered once, complete, at the end.
+      // Stream the answer live, as soon as tokens arrive.
       if (!msg.content) msg.activityLabel = "Writing the answer";
       msg.content += ev.delta || "";
-      if (visible) updateLiveLabel(msg, msg.activityLabel);
+      if (visible) {
+        setReasonSummary(msg, msg.activityLabel, true);
+        scheduleContentRender(msg);
+      }
       break;
     case "title":
       run.title = ev.title;
@@ -548,6 +599,7 @@ function handleEvent(run, ev) {
       break;
     case "error":
       msg.content += (msg.content ? "\n\n" : "") + "⚠️ " + (ev.message || "Error");
+      if (visible) scheduleContentRender(msg);
       break;
   }
 }

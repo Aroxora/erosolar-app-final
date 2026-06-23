@@ -3,10 +3,14 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <meta name="theme-color" content="#17120c" />
+    <meta name="theme-color" content="#0a0a12" />
     <title>Erosolar</title>
     <meta name="description" content="Erosolar — an AI assistant powered by DeepSeek v4 Pro with live web search." />
-    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Ccircle cx='12' cy='12' r='5' fill='%23f6a623'/%3E%3Cg stroke='%23f6a623' stroke-width='2' stroke-linecap='round'%3E%3Cpath d='M12 1v3M12 20v3M1 12h3M20 12h3M4 4l2 2M18 18l2 2M20 4l-2 2M6 18l-2 2'/%3E%3C/g%3E%3C/svg%3E" />
+    <link rel="icon" type="image/png" sizes="32x32" href="./favicon-32.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="./favicon-16.png" />
+    <link rel="icon" type="image/png" sizes="192x192" href="./icon-192.png" />
+    <link rel="apple-touch-icon" href="./apple-touch-icon.png" />
+    <link rel="manifest" href="./manifest.webmanifest" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
@@ -20,7 +24,7 @@
     <div id="login" class="login" hidden>
       <div class="login-card">
         <div class="brand">
-          <span class="sun" aria-hidden="true"></span>
+          <img class="brand-icon brand-icon-lg" src="./icon-512.png" alt="Erosolar" />
           <h1>Erosolar</h1>
         </div>
         <p class="tagline">An AI assistant powered by <strong>DeepSeek&nbsp;v4&nbsp;Pro</strong> with live web search.</p>
@@ -42,7 +46,7 @@
       <aside id="sidebar" class="sidebar">
         <div class="sidebar-head">
           <div class="brand brand-sm">
-            <span class="sun" aria-hidden="true"></span>
+            <img class="brand-icon brand-icon-sm" src="./icon-192.png" alt="" />
             <span>Erosolar</span>
           </div>
           <button id="new-chat" class="btn-new" title="New chat">
@@ -70,7 +74,7 @@
 
         <div id="messages" class="messages">
           <div id="empty-state" class="empty">
-            <span class="sun sun-lg" aria-hidden="true"></span>
+            <img class="brand-icon brand-icon-xl" src="./icon-512.png" alt="" />
             <h3>How can I help?</h3>
             <p>Ask anything. I'll search the web when I need current information.</p>
             <div class="suggestions">
