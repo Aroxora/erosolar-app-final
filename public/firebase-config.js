@@ -10,3 +10,10 @@ export const firebaseConfig = {
   appId: "1:331671595471:web:79c2952f3644e6b5140aba",
   measurementId: "G-KPM6PF5XVT",
 };
+
+// The chat backend is called DIRECTLY at its Cloud Run URL rather than through
+// the Firebase Hosting /api rewrite: Hosting buffers rewrite responses and caps
+// them at ~60s, which prevents SSE streaming and 502s on long answers. Calling
+// Cloud Run directly gives true token streaming and the function's 300s timeout.
+// (CORS is enabled on the function; auth is still enforced via the ID token.)
+export const apiBase = "https://api-jtgd5ydvyq-uc.a.run.app";

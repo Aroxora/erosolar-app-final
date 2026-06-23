@@ -1,4 +1,4 @@
-import { firebaseConfig } from "./firebase-config.js";
+import { firebaseConfig, apiBase } from "./firebase-config.js";
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
 import {
   getAuth,
@@ -312,17 +312,6 @@ function clearActivity(msg) {
   }
 }
 
-let rafPending = false;
-function scheduleRender(msg) {
-  if (rafPending) return;
-  rafPending = true;
-  requestAnimationFrame(() => {
-    rafPending = false;
-    paintAssistant(msg);
-    scrollToBottom(false);
-  });
-}
-
 function renderSources(msg) {
   if (!msg._sourcesEl || !msg.sources || !msg.sources.length) return;
   msg._sourcesEl.innerHTML = "";
@@ -408,7 +397,7 @@ async function sendMessage(text) {
 
   try {
     const token = await auth.currentUser.getIdToken();
-    const resp = await fetch("/api/chat", {
+    const resp = await fetch(apiBase + "/api/chat", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -448,48 +437,50 @@ async function sendMessage(text) {
   } catch (err) {
     aMsg.content += (aMsg.content ? "\n\n" : "") + "⚠️ " + (err.message || "Something went wrong.");
   } finally {
+    // Render the one useful part — the final, complete answer — exactly once.
     aMsg.streaming = false;
     clearActivity(aMsg);
     paintAssistant(aMsg);
+    renderSources(aMsg);
     finalizeReasoning(aMsg);
     setSending(false);
     els.input.focus();
-    scrollToBottom(false);
+    scrollToBottom(true);
   }
 }
 
 function handleEvent(aMsg, ev) {
   switch (ev.type) {
     case "reasoning":
-      // Don't display raw thinking — just keep the activity line alive.
+      // Captured for the optional toggle; never shown while working.
       aMsg.reasoning += ev.delta || "";
       if (!aMsg.content) setActivity(aMsg, "Thinking");
       break;
     case "content":
-      if (!aMsg.content) clearActivity(aMsg); // first token → drop the status line
+      // Accumulate silently — the answer is rendered once, complete, at the end.
+      // The live activity line is what tells the user it's working.
+      if (!aMsg.content) setActivity(aMsg, "Writing the answer");
       aMsg.content += ev.delta || "";
-      scheduleRender(aMsg);
       break;
     case "tool":
-      if (ev.status === "start") {
-        setActivity(aMsg, ev.query ? `Searching · ${truncate(ev.query, 48)}` : "Searching the web");
-      } else {
-        setActivity(aMsg, "Reading results");
-      }
+      setActivity(
+        aMsg,
+        ev.status === "start"
+          ? ev.query
+            ? `Searching · ${truncate(ev.query, 48)}`
+            : "Searching the web"
+          : "Reading results"
+      );
       break;
     case "title":
       if (ev.title) els.title.textContent = ev.title;
       break;
     case "done":
       aMsg.id = ev.messageId;
-      if (ev.sources && ev.sources.length) {
-        aMsg.sources = ev.sources;
-        renderSources(aMsg);
-      }
+      if (ev.sources && ev.sources.length) aMsg.sources = ev.sources;
       break;
     case "error":
       aMsg.content += (aMsg.content ? "\n\n" : "") + "⚠️ " + (ev.message || "Error");
-      scheduleRender(aMsg);
       break;
   }
 }
