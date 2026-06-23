@@ -14,10 +14,13 @@ import {
   collection,
   doc,
   addDoc,
+  getDoc,
   getDocs,
   deleteDoc,
   query,
   orderBy,
+  limit,
+  writeBatch,
   onSnapshot,
   serverTimestamp,
 } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
@@ -121,6 +124,8 @@ onAuthStateChanged(auth, (user) => {
     state.activeId = null;
     state.messages = [];
     state.runs.clear();
+    const mm = document.getElementById("memory-modal");
+    if (mm) mm.hidden = true;
   }
 });
 
@@ -589,15 +594,25 @@ function handleEvent(run, ev) {
         updateReasonVisibility(msg);
       }
       break;
-    case "tool":
-      msg.activityLabel =
-        ev.status === "start"
-          ? ev.query
-            ? `Searching · ${truncate(ev.query, 56)}`
-            : "Searching the web"
-          : "Reading results";
+    case "tool": {
+      const isExtract = ev.name === "web_extract";
+      if (ev.status === "start") {
+        if (isExtract) {
+          const hosts = (ev.query || "")
+            .split(",")
+            .map((u) => hostOf(u.trim()))
+            .filter(Boolean)
+            .join(", ");
+          msg.activityLabel = hosts ? `Reading ${truncate(hosts, 56)}` : "Reading page";
+        } else {
+          msg.activityLabel = ev.query ? `Searching · ${truncate(ev.query, 56)}` : "Searching the web";
+        }
+      } else {
+        msg.activityLabel = isExtract ? "Reading page content" : "Reading results";
+      }
       if (visible) setReasonSummary(msg, msg.activityLabel, true);
       break;
+    }
     case "content": {
       // Stream the answer live, as soon as tokens arrive.
       const firstToken = !msg.content;
@@ -691,6 +706,136 @@ document.addEventListener("click", (e) => {
     els.form.requestSubmit();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Memory manager — view the curated profile + stored memories, delete/clear them
+// ---------------------------------------------------------------------------
+const memEls = {
+  open: $("#open-memory"),
+  modal: $("#memory-modal"),
+  close: $("#memory-close"),
+  profile: $("#memory-profile"),
+  list: $("#memory-list"),
+  clear: $("#memory-clear"),
+};
+
+memEls.open.addEventListener("click", openMemory);
+memEls.close.addEventListener("click", () => (memEls.modal.hidden = true));
+memEls.modal.addEventListener("click", (e) => {
+  if (e.target === memEls.modal) memEls.modal.hidden = true;
+});
+memEls.clear.addEventListener("click", clearAllMemories);
+
+async function openMemory() {
+  if (!state.user) return;
+  memEls.modal.hidden = false;
+  memEls.profile.className = "profile-box";
+  memEls.profile.textContent = "Loading…";
+  memEls.list.innerHTML = '<div class="mem-empty">Loading…</div>';
+
+  try {
+    const snap = await getDoc(doc(db, "users", state.user.uid));
+    const profile = snap.exists() ? snap.data().profile || "" : "";
+    if (profile.trim()) {
+      memEls.profile.innerHTML = renderMarkdown(profile);
+    } else {
+      memEls.profile.className = "profile-box empty";
+      memEls.profile.textContent = "No profile yet — Erosolar builds one as you chat.";
+    }
+  } catch {
+    memEls.profile.className = "profile-box empty";
+    memEls.profile.textContent = "Could not load profile.";
+  }
+
+  try {
+    const snap = await getDocs(
+      query(collection(db, "users", state.user.uid, "memories"), orderBy("createdAt", "desc"), limit(100))
+    );
+    renderMemoryList(snap.docs);
+  } catch (e) {
+    memEls.list.innerHTML = '<div class="mem-empty">Could not load memories.</div>';
+    console.error("memory list", e);
+  }
+}
+
+function memEmpty() {
+  memEls.list.innerHTML = '<div class="mem-empty">No stored memories yet.</div>';
+}
+
+function renderMemoryList(docs) {
+  memEls.list.innerHTML = "";
+  if (!docs.length) return memEmpty();
+  for (const d of docs) {
+    const m = d.data();
+    const role = m.role || "user";
+    const item = document.createElement("div");
+    item.className = "mem-item";
+
+    const main = document.createElement("div");
+    main.className = "mem-main";
+    const badge = document.createElement("span");
+    badge.className = "mem-badge " + (role === "assistant" ? "assistant" : role === "web" ? "web" : "user");
+    badge.textContent = role;
+    const text = document.createElement("div");
+    text.className = "mem-text";
+    text.textContent = truncate(m.text || "", 280);
+    main.appendChild(badge);
+    main.appendChild(text);
+    if (m.url) {
+      const meta = document.createElement("div");
+      meta.className = "mem-meta";
+      const a = document.createElement("a");
+      a.href = m.url;
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
+      a.textContent = hostOf(m.url);
+      meta.appendChild(a);
+      main.appendChild(meta);
+    }
+
+    const del = document.createElement("button");
+    del.className = "mem-del";
+    del.title = "Forget this";
+    del.innerHTML =
+      '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg>';
+    del.addEventListener("click", async () => {
+      del.disabled = true;
+      try {
+        await deleteDoc(doc(db, "users", state.user.uid, "memories", d.id));
+        item.remove();
+        if (!memEls.list.children.length) memEmpty();
+      } catch (e) {
+        del.disabled = false;
+        alert("Could not delete: " + e.message);
+      }
+    });
+
+    item.appendChild(main);
+    item.appendChild(del);
+    memEls.list.appendChild(item);
+  }
+}
+
+async function clearAllMemories() {
+  if (!state.user) return;
+  if (!confirm("Forget ALL stored memories? This can't be undone. (Your chat history is not affected.)")) return;
+  memEls.clear.disabled = true;
+  try {
+    for (;;) {
+      const snap = await getDocs(query(collection(db, "users", state.user.uid, "memories"), limit(400)));
+      if (snap.empty) break;
+      const batch = writeBatch(db);
+      snap.docs.forEach((d) => batch.delete(d.ref));
+      await batch.commit();
+      if (snap.size < 400) break;
+    }
+    memEmpty();
+  } catch (e) {
+    alert("Could not clear: " + e.message);
+  } finally {
+    memEls.clear.disabled = false;
+  }
+}
 
 // Mobile sidebar
 function closeSidebar() {
