@@ -4,6 +4,7 @@ import {
   getAuth,
   GoogleAuthProvider,
   signInWithPopup,
+  signInWithCredential,
   reauthenticateWithPopup,
   signOut,
   onAuthStateChanged,
@@ -32,6 +33,21 @@ const auth = getAuth(app);
 const db = getFirestore(app);
 const provider = new GoogleAuthProvider();
 setPersistence(auth, browserLocalPersistence).catch(() => {});
+
+// Native iOS wrapper bridge: Google blocks OAuth popups inside WKWebView, so the
+// Erosolar iOS app signs in natively and hands us the Google credential here.
+const isNativeWrapper = () =>
+  /ErosolarApp/.test(navigator.userAgent) && window.webkit?.messageHandlers?.erosolarGoogle;
+window.__erosolarGoogleCredential = async (idToken, accessToken) => {
+  try {
+    await signInWithCredential(auth, GoogleAuthProvider.credential(idToken, accessToken || null));
+  } catch (e) {
+    alert("Sign-in failed: " + (e.message || e.code));
+  }
+};
+window.__erosolarGoogleError = (msg) => {
+  if (msg) alert("Google sign-in: " + msg);
+};
 
 // ---------------------------------------------------------------------------
 // State
@@ -109,6 +125,11 @@ const msgsColRef = (id) =>
 // Auth
 // ---------------------------------------------------------------------------
 els.googleSignin.addEventListener("click", async () => {
+  if (isNativeWrapper()) {
+    // Hand off to the iOS app's native Google Sign-In.
+    window.webkit.messageHandlers.erosolarGoogle.postMessage({});
+    return;
+  }
   try {
     await signInWithPopup(auth, provider);
   } catch (e) {
