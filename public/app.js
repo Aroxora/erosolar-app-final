@@ -233,6 +233,7 @@ async function selectConversation(id, title) {
         content: data.content || "",
         reasoning: data.reasoning || "",
         sources: data.sources || [],
+        memoryUsed: data.memoryUsed || 0,
       });
     });
   } catch (e) {
@@ -304,6 +305,13 @@ function addMessageView(msg) {
     msg._reasonSummary = sum;
     msg._reasonBody = rbody;
 
+    // "Recalled from past chats" note — sits between the reasoning log and answer.
+    const memNote = document.createElement("div");
+    memNote.className = "memory-note";
+    memNote.hidden = true;
+    body.appendChild(memNote);
+    msg._memoryEl = memNote;
+
     const content = document.createElement("div");
     content.className = "content";
     body.appendChild(content);
@@ -321,6 +329,7 @@ function addMessageView(msg) {
       rbody.textContent = msg.reasoning || "";
       rbody.scrollTop = rbody.scrollHeight;
       updateReasonVisibility(msg);
+      renderMemoryNote(msg);
       paintAssistant(msg); // render any answer already streamed (re-attach case)
     } else {
       finalizeAssistant(msg);
@@ -380,6 +389,14 @@ function updateReasonVisibility(msg) {
   // While running, always show it (summary carries live status); once final,
   // keep it only if there were actual thoughts to reveal.
   msg._reasonDetails.hidden = msg.streaming ? false : !hasText;
+}
+function renderMemoryNote(msg) {
+  if (!msg._memoryEl) return;
+  const n = msg.memoryUsed || 0;
+  msg._memoryEl.hidden = n <= 0;
+  if (n > 0) {
+    msg._memoryEl.textContent = `🧠 Drew on ${n} note${n === 1 ? "" : "s"} from your past chats`;
+  }
 }
 
 function renderSources(msg) {
@@ -445,6 +462,7 @@ function finalizeAssistant(msg) {
   if (msg._reasonBody) msg._reasonBody.textContent = (msg.reasoning || "").trim();
   setReasonSummary(msg, "Reasoning", false);
   updateReasonVisibility(msg);
+  renderMemoryNote(msg);
   paintAssistant(msg);
   renderSources(msg);
   addAssistantCopy(msg);
@@ -593,12 +611,21 @@ function handleEvent(run, ev) {
       }
       break;
     }
+    case "memory":
+      // Recalled relevant context from the user's other conversations.
+      msg.memoryUsed = ev.count || 0;
+      if (visible) {
+        setReasonSummary(msg, "Recalling from past chats", true);
+        renderMemoryNote(msg);
+      }
+      break;
     case "title":
       run.title = ev.title;
       if (visible && ev.title) els.title.textContent = ev.title;
       break;
     case "done":
       msg.id = ev.messageId;
+      if (typeof ev.memoryUsed === "number") msg.memoryUsed = ev.memoryUsed;
       if (ev.sources && ev.sources.length) msg.sources = ev.sources;
       break;
     case "error":

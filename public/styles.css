@@ -23,14 +23,18 @@
 }
 
 * { box-sizing: border-box; }
+button { -webkit-tap-highlight-color: transparent; }
 html, body { height: 100%; }
 body {
   margin: 0;
   font-family: var(--font);
   background: radial-gradient(1100px 760px at 50% -12%, #1d1d40 0%, var(--bg) 56%);
   color: var(--text);
+  overflow-x: hidden;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
 [hidden] { display: none !important; }
 
@@ -224,6 +228,9 @@ body {
 }
 .reasoning-body:empty { display: none; }
 
+/* "Recalled from past chats" note */
+.memory-note { margin: 0 0 10px; font-size: 12.5px; color: var(--accent-2); }
+
 /* Per-message copy button */
 .msg-actions { margin-top: 10px; }
 .copy-btn {
@@ -256,7 +263,7 @@ body {
 @keyframes blink { 50% { opacity: 0; } }
 
 /* ---------- Composer ---------- */
-.composer { padding: 8px 0 18px; border-top: 1px solid var(--border); background: var(--bg); }
+.composer { padding: 8px 0 max(18px, env(safe-area-inset-bottom)); border-top: 1px solid var(--border); background: var(--bg); }
 .composer-inner {
   max-width: 800px; margin: 0 auto; padding: 0 24px;
   display: flex; align-items: flex-end; gap: 10px;
@@ -265,7 +272,7 @@ body {
   flex: 1; resize: none; max-height: 200px;
   background: var(--panel); color: var(--text);
   border: 1px solid var(--border); border-radius: var(--radius);
-  padding: 13px 16px; font: inherit; font-size: 15px; line-height: 1.5;
+  padding: 13px 16px; font: inherit; font-size: 16px; line-height: 1.5;
   outline: none; transition: border-color 0.15s ease;
 }
 .composer textarea:focus { border-color: var(--accent); }
@@ -289,11 +296,24 @@ body {
 @media (max-width: 760px) {
   .app { grid-template-columns: 1fr; }
   .sidebar {
-    position: fixed; inset: 0 auto 0 0; width: 280px; z-index: 40;
+    position: fixed; inset: 0 auto 0 0; width: min(86vw, 300px); z-index: 40;
     transform: translateX(-100%); transition: transform 0.2s ease;
     box-shadow: var(--shadow);
+    padding-top: env(safe-area-inset-top);
   }
   .app.sidebar-open .sidebar { transform: translateX(0); }
-  .icon-btn { display: grid; place-items: center; }
-  .scrim { position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 30; }
+  .icon-btn { display: grid; place-items: center; padding: 8px; margin-left: -4px; }
+  .scrim { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.5); z-index: 30; }
+
+  .chat-head { padding: 12px 16px; padding-top: max(12px, env(safe-area-inset-top)); }
+  .messages { padding: 16px 0; }
+  .msg { padding: 12px 16px; gap: 11px; }
+  .composer-inner { padding: 0 14px; }
+  .empty { margin-top: 12vh; padding: 0 18px; }
+  .empty h3 { font-size: 21px; }
+  .login-card { padding: 32px 22px; }
+  /* Wide tables and code scroll within the bubble instead of overflowing */
+  .content table { display: block; overflow-x: auto; }
+  .content pre { font-size: 0.8em; }
+  .source-chip { max-width: 100%; }
 }

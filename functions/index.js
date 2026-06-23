@@ -40,6 +40,16 @@ const MAX_INPUT_CHARS = 16000; // cap on a single user message
 const MAX_TOOL_ROUNDS = 4; // web_search iterations before forcing an answer
 const TAVILY_MAX_RESULTS = 6;
 
+// Cross-conversation memory (Firestore vector search + Vertex AI embeddings).
+const PROJECT_ID = process.env.GCLOUD_PROJECT || "erosolar-coder-506ae";
+const VERTEX_LOCATION = "us-central1";
+const EMBED_MODEL = "text-embedding-005"; // 768-dim, within Firestore's vector limit
+const EMBED_INPUT_CHARS = 8000;
+const MEMORY_TOP_K = 6; // nearest neighbours fetched
+const MEMORY_KEEP = 5; // injected after filtering out the current chat
+const MEMORY_MAX_DISTANCE = 0.6; // COSINE distance ceiling (lower = more similar)
+const MEMORY_TEXT_CHARS = 600; // per-memory snippet length in the prompt
+
 const SYSTEM_PROMPT = `You are Erosolar, a sharp, friendly, and precise AI assistant.
 
 - Answer clearly and concisely. Use Markdown (headings, lists, tables, fenced code blocks) when it improves readability.
@@ -192,6 +202,78 @@ async function streamDeepSeek({ messages, apiKey, onDelta, toolChoice = "auto" }
 }
 
 // ---------------------------------------------------------------------------
+// Cross-conversation memory — Vertex AI embeddings + Firestore vector search.
+// ---------------------------------------------------------------------------
+let _accessToken = { value: "", expiresAt: 0 };
+async function getAccessToken() {
+  if (_accessToken.value && Date.now() < _accessToken.expiresAt) return _accessToken.value;
+  const resp = await fetch(
+    "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token",
+    { headers: { "Metadata-Flavor": "Google" } }
+  );
+  if (!resp.ok) throw new Error(`metadata token ${resp.status}`);
+  const j = await resp.json();
+  _accessToken = { value: j.access_token, expiresAt: Date.now() + (j.expires_in - 60) * 1000 };
+  return _accessToken.value;
+}
+
+async function embed(text, taskType) {
+  const token = await getAccessToken();
+  const url = `https://${VERTEX_LOCATION}-aiplatform.googleapis.com/v1/projects/${PROJECT_ID}/locations/${VERTEX_LOCATION}/publishers/google/models/${EMBED_MODEL}:predict`;
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      instances: [{ task_type: taskType, content: (text || "").slice(0, EMBED_INPUT_CHARS) }],
+    }),
+  });
+  if (!resp.ok) {
+    const t = await resp.text().catch(() => "");
+    throw new Error(`Vertex embed ${resp.status}: ${t.slice(0, 200)}`);
+  }
+  const j = await resp.json();
+  return j.predictions[0].embeddings.values;
+}
+
+// Recall snippets from the user's OTHER conversations relevant to the new query.
+async function retrieveMemories(uid, queryText, currentConvId) {
+  const qvec = await embed(queryText, "RETRIEVAL_QUERY");
+  const snap = await db
+    .collection("users").doc(uid).collection("memories")
+    .findNearest({
+      vectorField: "embedding",
+      queryVector: admin.firestore.FieldValue.vector(qvec),
+      limit: MEMORY_TOP_K,
+      distanceMeasure: "COSINE",
+      distanceResultField: "_distance",
+      distanceThreshold: MEMORY_MAX_DISTANCE,
+    })
+    .get();
+  const items = [];
+  snap.forEach((d) => {
+    const m = d.data();
+    if (m.conversationId === currentConvId) return; // current chat is already in full history
+    items.push({ role: m.role || "user", text: (m.text || "").slice(0, MEMORY_TEXT_CHARS) });
+  });
+  return items.slice(0, MEMORY_KEEP);
+}
+
+// Embed one turn's text into a memory doc (written in the success-path batch).
+async function buildMemoryDoc(uid, convId, role, text) {
+  const vec = await embed(text, "RETRIEVAL_DOCUMENT");
+  return {
+    ref: db.collection("users").doc(uid).collection("memories").doc(),
+    data: {
+      text: (text || "").slice(0, 2000),
+      role,
+      conversationId: convId,
+      embedding: admin.firestore.FieldValue.vector(vec),
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // HTTPS entry point
 // ---------------------------------------------------------------------------
 exports.api = onRequest(
@@ -294,9 +376,28 @@ exports.api = onRequest(
         send({ type: "title", title: titleToSet });
       }
 
+      // Cross-conversation memory — recall relevant notes from the user's OTHER
+      // chats. Best-effort: any failure degrades gracefully to no memory.
+      let memoryContext = "";
+      let memoryUsed = 0;
+      try {
+        const mems = await retrieveMemories(uid, userText, conversationId);
+        if (mems.length) {
+          memoryUsed = mems.length;
+          memoryContext =
+            "Relevant notes recalled from the user's earlier conversations " +
+            "(use only if helpful; otherwise ignore):\n" +
+            mems.map((m, i) => `${i + 1}. [${m.role}] ${m.text}`).join("\n");
+          send({ type: "memory", count: memoryUsed });
+        }
+      } catch (e) {
+        logger.warn("memory retrieve failed", { error: e.message });
+      }
+
       // Build the model conversation.
       const messages = [
         { role: "system", content: SYSTEM_PROMPT },
+        ...(memoryContext ? [{ role: "system", content: memoryContext }] : []),
         ...history,
         { role: "user", content: userText },
       ];
@@ -383,6 +484,17 @@ exports.api = onRequest(
         return;
       }
 
+      // Embed this turn for future recall (best-effort — never fails the turn).
+      let memoryDocs = [];
+      try {
+        memoryDocs = await Promise.all([
+          buildMemoryDoc(uid, conversationId, "user", userText),
+          buildMemoryDoc(uid, conversationId, "assistant", finalContent),
+        ]);
+      } catch (e) {
+        logger.warn("memory embed failed", { error: e.message });
+      }
+
       // Persist the user + assistant turn together, and only on success, so a
       // failed request can never orphan a user message and corrupt history.
       const batch = db.batch();
@@ -395,6 +507,7 @@ exports.api = onRequest(
         content: finalContent,
         reasoning: finalReasoning || "",
         sources,
+        memoryUsed,
         model: DEEPSEEK_MODEL,
         // +1ms guarantees user-before-assistant ordering under orderBy(createdAt).
         createdAt: admin.firestore.Timestamp.fromMillis(ts.toMillis() + 1),
@@ -403,9 +516,10 @@ exports.api = onRequest(
       if (!convExists) convUpdate.createdAt = admin.firestore.FieldValue.serverTimestamp();
       if (titleToSet) convUpdate.title = titleToSet;
       batch.set(convRef, convUpdate, { merge: true });
+      for (const md of memoryDocs) batch.set(md.ref, md.data);
       await batch.commit();
 
-      send({ type: "done", messageId: assistantRef.id, sources });
+      send({ type: "done", messageId: assistantRef.id, sources, memoryUsed });
       res.end();
     } catch (err) {
       logger.error("chat handler error", { error: err.message, uid });
