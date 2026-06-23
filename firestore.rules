@@ -25,6 +25,12 @@ service cloud.firestore {
         allow create, update: if false;
       }
 
+      // Uploaded-document registry: backend-created; owner may list and delete.
+      match /documents/{did} {
+        allow read, delete: if owner(uid);
+        allow create, update: if false;
+      }
+
       match /conversations/{cid} {
         allow read, create, update, delete: if owner(uid);
 

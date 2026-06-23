@@ -90,7 +90,12 @@
         </div>
 
         <form id="composer" class="composer" autocomplete="off">
+          <div id="upload-status" class="upload-status" hidden></div>
           <div class="composer-inner">
+            <button id="attach-btn" type="button" class="attach-btn" aria-label="Attach a document" title="Attach a document (PDF, text, markdown…)">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+            </button>
+            <input id="file-input" type="file" accept=".txt,.md,.markdown,.csv,.json,.log,.pdf,text/*,application/pdf,application/json" hidden />
             <textarea id="input" rows="1" placeholder="Message Erosolar…" enterkeyhint="send"></textarea>
             <button id="send" type="submit" class="send-btn" aria-label="Send" disabled>
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>
@@ -114,6 +119,13 @@
           <section class="mem-section">
             <h4>Your profile</h4>
             <div id="memory-profile" class="profile-box">Loading…</div>
+          </section>
+          <section class="mem-section">
+            <div class="mem-list-head">
+              <h4>Documents</h4>
+              <button id="doc-upload" class="link">Upload</button>
+            </div>
+            <div id="doc-list" class="mem-list"></div>
           </section>
           <section class="mem-section">
             <div class="mem-list-head">

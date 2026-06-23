@@ -18,6 +18,7 @@ import {
   getDocs,
   deleteDoc,
   query,
+  where,
   orderBy,
   limit,
   writeBatch,
@@ -729,6 +730,7 @@ memEls.clear.addEventListener("click", clearAllMemories);
 async function openMemory() {
   if (!state.user) return;
   memEls.modal.hidden = false;
+  loadDocuments();
   memEls.profile.className = "profile-box";
   memEls.profile.textContent = "Loading…";
   memEls.list.innerHTML = '<div class="mem-empty">Loading…</div>';
@@ -834,6 +836,159 @@ async function clearAllMemories() {
     alert("Could not clear: " + e.message);
   } finally {
     memEls.clear.disabled = false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Document upload / RAG — extract text client-side, send to /api/ingest
+// ---------------------------------------------------------------------------
+const upEls = {
+  attach: $("#attach-btn"),
+  fileInput: $("#file-input"),
+  status: $("#upload-status"),
+  docUpload: $("#doc-upload"),
+  docList: $("#doc-list"),
+};
+
+upEls.attach.addEventListener("click", () => upEls.fileInput.click());
+upEls.docUpload.addEventListener("click", () => upEls.fileInput.click());
+upEls.fileInput.addEventListener("change", () => {
+  const file = upEls.fileInput.files && upEls.fileInput.files[0];
+  upEls.fileInput.value = "";
+  if (file) ingestFile(file);
+});
+
+function showUpload(text, kind) {
+  upEls.status.hidden = false;
+  upEls.status.className = "upload-status" + (kind ? " " + kind : "");
+  upEls.status.innerHTML = (kind === "busy" ? '<span class="spinner"></span>' : "") + "<span></span>";
+  upEls.status.querySelector("span:last-child").textContent = text;
+}
+function hideUploadLater(ms) {
+  setTimeout(() => {
+    upEls.status.hidden = true;
+    upEls.status.innerHTML = "";
+  }, ms);
+}
+
+async function extractText(file) {
+  const isPdf = file.type === "application/pdf" || /\.pdf$/i.test(file.name);
+  if (!isPdf) return await file.text();
+  const pdfjs = await import("https://cdn.jsdelivr.net/npm/pdfjs-dist@4/build/pdf.min.mjs");
+  pdfjs.GlobalWorkerOptions.workerSrc = "https://cdn.jsdelivr.net/npm/pdfjs-dist@4/build/pdf.worker.min.mjs";
+  const buf = await file.arrayBuffer();
+  const pdf = await pdfjs.getDocument({ data: buf }).promise;
+  let out = "";
+  for (let p = 1; p <= pdf.numPages; p++) {
+    const page = await pdf.getPage(p);
+    const tc = await page.getTextContent();
+    out += tc.items.map((it) => it.str).join(" ") + "\n\n";
+    if (out.length > 400000) break;
+  }
+  return out;
+}
+
+async function ingestFile(file) {
+  if (!state.user) return;
+  if (file.size > 10 * 1024 * 1024) {
+    showUpload("File too large (max 10 MB).", "error");
+    return hideUploadLater(4000);
+  }
+  showUpload(`Reading ${truncate(file.name, 40)}…`, "busy");
+  let text = "";
+  try {
+    text = await extractText(file);
+  } catch (e) {
+    console.error("extract", e);
+    showUpload("Couldn't read that file.", "error");
+    return hideUploadLater(4000);
+  }
+  if (!text || !text.trim()) {
+    showUpload("No text found in that file.", "error");
+    return hideUploadLater(4000);
+  }
+  showUpload(`Indexing ${truncate(file.name, 40)}…`, "busy");
+  try {
+    const token = await auth.currentUser.getIdToken();
+    const resp = await fetch(apiBase + "/api/ingest", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
+      body: JSON.stringify({ filename: file.name, text }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || "HTTP " + resp.status);
+    showUpload(`✓ Added ${truncate(file.name, 40)} · ${data.chunks} excerpt${data.chunks === 1 ? "" : "s"}`, "ok");
+    hideUploadLater(5000);
+    const modal = document.getElementById("memory-modal");
+    if (modal && !modal.hidden) loadDocuments();
+  } catch (e) {
+    showUpload("Indexing failed: " + e.message, "error");
+    hideUploadLater(5000);
+  }
+}
+
+async function loadDocuments() {
+  upEls.docList.innerHTML = '<div class="mem-empty">Loading…</div>';
+  try {
+    const snap = await getDocs(
+      query(collection(db, "users", state.user.uid, "documents"), orderBy("createdAt", "desc"))
+    );
+    if (snap.empty) {
+      upEls.docList.innerHTML = '<div class="mem-empty">No documents uploaded yet.</div>';
+      return;
+    }
+    upEls.docList.innerHTML = "";
+    snap.forEach((d) => {
+      const data = d.data();
+      const item = document.createElement("div");
+      item.className = "mem-item";
+      const main = document.createElement("div");
+      main.className = "mem-main";
+      const t = document.createElement("div");
+      t.className = "mem-text";
+      t.textContent = data.filename || "document";
+      const meta = document.createElement("div");
+      meta.className = "mem-meta";
+      meta.textContent = `${data.chunks || 0} excerpt${data.chunks === 1 ? "" : "s"} indexed`;
+      main.appendChild(t);
+      main.appendChild(meta);
+      const del = document.createElement("button");
+      del.className = "mem-del";
+      del.title = "Delete document";
+      del.innerHTML =
+        '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg>';
+      del.addEventListener("click", () => deleteDocument(d.id, item, del));
+      item.appendChild(main);
+      item.appendChild(del);
+      upEls.docList.appendChild(item);
+    });
+  } catch (e) {
+    upEls.docList.innerHTML = '<div class="mem-empty">Could not load documents.</div>';
+    console.error("docs", e);
+  }
+}
+
+async function deleteDocument(docId, item, del) {
+  if (!confirm("Delete this document and everything Erosolar learned from it?")) return;
+  del.disabled = true;
+  try {
+    for (;;) {
+      const snap = await getDocs(
+        query(collection(db, "users", state.user.uid, "memories"), where("docId", "==", docId), limit(400))
+      );
+      if (snap.empty) break;
+      const batch = writeBatch(db);
+      snap.docs.forEach((d) => batch.delete(d.ref));
+      await batch.commit();
+      if (snap.size < 400) break;
+    }
+    await deleteDoc(doc(db, "users", state.user.uid, "documents", docId));
+    item.remove();
+    if (!upEls.docList.children.length)
+      upEls.docList.innerHTML = '<div class="mem-empty">No documents uploaded yet.</div>';
+  } catch (e) {
+    del.disabled = false;
+    alert("Could not delete: " + e.message);
   }
 }
 

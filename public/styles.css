@@ -331,6 +331,19 @@ body {
 .send-btn:hover:not(:disabled) { background: var(--accent-2); }
 .send-btn:active:not(:disabled) { transform: translateY(1px); }
 .send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.attach-btn {
+  flex: none; width: 40px; height: 44px; border-radius: 10px;
+  background: none; border: none; color: var(--text-faint); cursor: pointer;
+  display: grid; place-items: center;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+.attach-btn:hover { color: var(--text); background: var(--panel); }
+.upload-status {
+  max-width: 800px; margin: 0 auto 8px; padding: 0 24px;
+  display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-dim);
+}
+.upload-status.ok { color: var(--accent-2); }
+.upload-status.error { color: var(--danger); }
 
 /* Scrollbars */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
