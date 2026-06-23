@@ -48,6 +48,12 @@ window.__erosolarGoogleCredential = async (idToken, accessToken) => {
 window.__erosolarGoogleError = (msg) => {
   if (msg) alert("Google sign-in: " + msg);
 };
+// Native connector flow result: an access token carrying Calendar/Gmail/Drive scopes.
+window.__erosolarGoogleConnect = (accessToken, expiresIn) => {
+  state.googleToken = accessToken;
+  state.googleTokenExp = Date.now() + Math.max(60, (Number(expiresIn) || 3300) - 300) * 1000;
+  renderConnections();
+};
 
 // ---------------------------------------------------------------------------
 // State
@@ -590,6 +596,11 @@ function renderConnections() {
 
 async function connectGoogle() {
   if (!auth.currentUser) return;
+  // Inside the iOS app, Google blocks the OAuth popup — use the native bridge.
+  if (isNativeWrapper()) {
+    window.webkit.messageHandlers.erosolarConnect.postMessage({});
+    return;
+  }
   const provider = new GoogleAuthProvider();
   GOOGLE_SCOPES.forEach((s) => provider.addScope(s));
   try {

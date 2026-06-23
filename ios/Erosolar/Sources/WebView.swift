@@ -13,6 +13,7 @@ struct WebView: UIViewRepresentable {
     func makeUIView(context: Context) -> WKWebView {
         let contentController = WKUserContentController()
         contentController.add(context.coordinator, name: "erosolarGoogle")
+        contentController.add(context.coordinator, name: "erosolarConnect")
 
         let config = WKWebViewConfiguration()
         config.userContentController = contentController
@@ -41,14 +42,25 @@ struct WebView: UIViewRepresentable {
     final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
         weak var webView: WKWebView?
 
+        // Calendar / Gmail / Drive scopes for the in-app "Connect Google" flow.
+        private let connectorScopes = [
+            "https://www.googleapis.com/auth/calendar.events",
+            "https://www.googleapis.com/auth/gmail.modify",
+            "https://www.googleapis.com/auth/drive.readonly",
+        ]
+
         @objc func reload(_ control: UIRefreshControl) {
             webView?.reload()
             control.endRefreshing()
         }
 
-        // Web app -> native: please sign in with Google.
+        // Web app -> native bridge.
         func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
-            if message.name == "erosolarGoogle" { startGoogleSignIn() }
+            switch message.name {
+            case "erosolarGoogle": startGoogleSignIn()
+            case "erosolarConnect": startGoogleConnect()
+            default: break
+            }
         }
 
         private func startGoogleSignIn() {
@@ -65,6 +77,23 @@ struct WebView: UIViewRepresentable {
                 }
                 let accessToken = user.accessToken.tokenString
                 self.callJS("window.__erosolarGoogleCredential && window.__erosolarGoogleCredential(\(Self.jsString(idToken)), \(Self.jsString(accessToken)))")
+            }
+        }
+
+        // Connect Google services (Calendar/Gmail/Drive) — incremental consent,
+        // returns an access token carrying the connector scopes to the web app.
+        private func startGoogleConnect() {
+            guard let presenter = Self.topViewController() else { return }
+            GIDSignIn.sharedInstance.signIn(withPresenting: presenter, hint: nil, additionalScopes: connectorScopes) { [weak self] result, error in
+                guard let self else { return }
+                if let error {
+                    self.callJS("window.__erosolarGoogleError && window.__erosolarGoogleError(\(Self.jsString(error.localizedDescription)))")
+                    return
+                }
+                guard let user = result?.user else { return }
+                let token = user.accessToken.tokenString
+                let expiresIn = max(0, Int(user.accessToken.expirationDate?.timeIntervalSinceNow ?? 3300))
+                self.callJS("window.__erosolarGoogleConnect && window.__erosolarGoogleConnect(\(Self.jsString(token)), \(expiresIn))")
             }
         }
 
