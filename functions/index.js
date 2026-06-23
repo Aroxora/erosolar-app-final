@@ -55,6 +55,7 @@ const MEMORY_TOP_K = 6; // nearest neighbours fetched
 const MEMORY_KEEP = 5; // injected after filtering out the current chat
 const MEMORY_MAX_DISTANCE = 0.6; // COSINE distance ceiling (lower = more similar)
 const MEMORY_TEXT_CHARS = 600; // per-memory snippet length in the prompt
+const MEMORY_DEDUP_DISTANCE = 0.08; // skip a new memory this close to an existing one
 
 // Curated, always-on user profile (durable facts), maintained by the cheap model.
 const PROFILE_MODEL = "deepseek-v4-flash";
@@ -176,11 +177,203 @@ async function tavilyExtract(urls, apiKey) {
 }
 
 // ---------------------------------------------------------------------------
+// Google connector tools — only offered to the model when the user has connected
+// their Google account (a short-lived OAuth access token is passed per request).
+// Read tools execute live; write tools (calendar event / gmail draft) are
+// proposed and require explicit user confirmation (see /api/action).
+// ---------------------------------------------------------------------------
+const CONNECTOR_TOOLS = [
+  {
+    type: "function",
+    function: {
+      name: "calendar_list",
+      description: "List the user's upcoming Google Calendar events. Use for questions about their schedule, availability, or what's coming up.",
+      parameters: {
+        type: "object",
+        properties: {
+          days: { type: "number", description: "How many days ahead to look (default 7)." },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "gmail_search",
+      description: "Search the user's Gmail and return matching message summaries (subject, from, date, snippet). Use Gmail search syntax in `query` (e.g. 'from:alice newer_than:7d').",
+      parameters: {
+        type: "object",
+        properties: { query: { type: "string", description: "Gmail search query." } },
+        required: ["query"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "drive_search",
+      description: "Search the user's Google Drive by keywords and return matching files (name, type, link).",
+      parameters: {
+        type: "object",
+        properties: { query: { type: "string", description: "Keywords to search file contents/names." } },
+        required: ["query"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "calendar_create",
+      description: "Propose creating a Google Calendar event. This does NOT create it directly — the user must confirm. Provide ISO 8601 start/end datetimes (include timezone offset).",
+      parameters: {
+        type: "object",
+        properties: {
+          summary: { type: "string" },
+          start: { type: "string", description: "ISO 8601 start, e.g. 2026-07-01T15:00:00-07:00" },
+          end: { type: "string", description: "ISO 8601 end." },
+          description: { type: "string" },
+          location: { type: "string" },
+        },
+        required: ["summary", "start", "end"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "gmail_draft",
+      description: "Propose a Gmail draft. This does NOT send anything — it creates a draft only after the user confirms.",
+      parameters: {
+        type: "object",
+        properties: {
+          to: { type: "string", description: "Recipient email address(es), comma-separated." },
+          subject: { type: "string" },
+          body: { type: "string" },
+        },
+        required: ["to", "subject", "body"],
+      },
+    },
+  },
+];
+
+async function googleGet(url, token) {
+  const resp = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+  if (!resp.ok) {
+    const t = await resp.text().catch(() => "");
+    throw new Error(`Google ${resp.status}: ${t.slice(0, 160)}`);
+  }
+  return resp.json();
+}
+
+async function calendarList(token, days) {
+  const now = new Date();
+  const timeMin = now.toISOString();
+  const timeMax = new Date(now.getTime() + (days || 7) * 86400000).toISOString();
+  const url =
+    "https://www.googleapis.com/calendar/v3/calendars/primary/events?" +
+    `timeMin=${encodeURIComponent(timeMin)}&timeMax=${encodeURIComponent(timeMax)}` +
+    "&singleEvents=true&orderBy=startTime&maxResults=15";
+  const data = await googleGet(url, token);
+  return (data.items || []).map((e) => ({
+    summary: e.summary || "(no title)",
+    start: (e.start && (e.start.dateTime || e.start.date)) || "",
+    end: (e.end && (e.end.dateTime || e.end.date)) || "",
+    location: e.location || "",
+  }));
+}
+
+async function gmailSearch(token, query) {
+  const list = await googleGet(
+    `https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=5&q=${encodeURIComponent(query)}`,
+    token
+  );
+  const ids = (list.messages || []).map((m) => m.id);
+  const out = [];
+  for (const id of ids) {
+    try {
+      const m = await googleGet(
+        `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Date`,
+        token
+      );
+      const h = {};
+      for (const hdr of (m.payload && m.payload.headers) || []) h[hdr.name] = hdr.value;
+      out.push({ subject: h.Subject || "", from: h.From || "", date: h.Date || "", snippet: (m.snippet || "").slice(0, 300) });
+    } catch (e) {
+      /* skip a single failed message */
+    }
+  }
+  return out;
+}
+
+async function driveSearch(token, query) {
+  const q = `fullText contains '${String(query).replace(/'/g, "")}' and trashed = false`;
+  const url =
+    "https://www.googleapis.com/drive/v3/files?pageSize=5&fields=files(name,mimeType,webViewLink,modifiedTime)&q=" +
+    encodeURIComponent(q);
+  const data = await googleGet(url, token);
+  return (data.files || []).map((f) => ({
+    name: f.name,
+    type: f.mimeType,
+    link: f.webViewLink || "",
+    modified: f.modifiedTime || "",
+  }));
+}
+
+async function calendarCreate(token, params) {
+  const body = {
+    summary: params.summary,
+    description: params.description || "",
+    location: params.location || "",
+    // timeZone makes offset-less datetimes valid (the client sends its IANA zone).
+    start: { dateTime: params.start, timeZone: params.timeZone || undefined },
+    end: { dateTime: params.end, timeZone: params.timeZone || undefined },
+  };
+  const resp = await fetch("https://www.googleapis.com/calendar/v3/calendars/primary/events", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) {
+    const t = await resp.text().catch(() => "");
+    throw new Error(`Calendar ${resp.status}: ${t.slice(0, 160)}`);
+  }
+  const e = await resp.json();
+  return { id: e.id, link: e.htmlLink || "" };
+}
+
+async function gmailDraft(token, params) {
+  const enc2047 = (s) => (/[^\x00-\x7F]/.test(s) ? "=?UTF-8?B?" + Buffer.from(s, "utf8").toString("base64") + "?=" : s);
+  const to = params.to || "";
+  const subject = params.subject || "";
+  const bodyText = params.body || "";
+  const raw = [
+    `To: ${to}`,
+    `Subject: ${enc2047(subject)}`,
+    "MIME-Version: 1.0",
+    "Content-Type: text/plain; charset=UTF-8",
+    "",
+    bodyText,
+  ].join("\r\n");
+  const encoded = Buffer.from(raw, "utf8").toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  const resp = await fetch("https://gmail.googleapis.com/gmail/v1/users/me/drafts", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ message: { raw: encoded } }),
+  });
+  if (!resp.ok) {
+    const t = await resp.text().catch(() => "");
+    throw new Error(`Gmail ${resp.status}: ${t.slice(0, 160)}`);
+  }
+  const d = await resp.json();
+  return { id: d.id };
+}
+
+// ---------------------------------------------------------------------------
 // DeepSeek streaming chat completion.
 // Invokes onDelta({ reasoning?, content? }) for each streamed fragment.
 // Returns { content, reasoning, toolCalls }.
 // ---------------------------------------------------------------------------
-async function streamDeepSeek({ messages, apiKey, onDelta, toolChoice = "auto" }) {
+async function streamDeepSeek({ messages, apiKey, onDelta, toolChoice = "auto", tools = TOOLS }) {
   const reqBody = {
     model: DEEPSEEK_MODEL,
     messages,
@@ -189,7 +382,7 @@ async function streamDeepSeek({ messages, apiKey, onDelta, toolChoice = "auto" }
   };
   // toolChoice "none" => omit tools entirely so the model must answer in text.
   if (toolChoice !== "none") {
-    reqBody.tools = TOOLS;
+    reqBody.tools = tools;
     reqBody.tool_choice = "auto";
   }
 
@@ -378,6 +571,7 @@ async function buildMemoryDoc(uid, convId, role, text, url) {
       : col.doc();
   return {
     ref,
+    vec, // raw vector, used for dedup before writing
     data: {
       text: (text || "").slice(0, 2000),
       role,
@@ -389,6 +583,37 @@ async function buildMemoryDoc(uid, convId, role, text, url) {
       expireAt: admin.firestore.Timestamp.fromMillis(Date.now() + MEMORY_TTL_DAYS * 86400000),
     },
   };
+}
+
+// Drop a memory if one almost identical to it already exists (consolidation —
+// keeps the store from filling with near-duplicate facts). Web docs are skipped
+// (already idempotent per URL). Returns the docs that should actually be written.
+async function dedupeMemories(uid, docs) {
+  const col = db.collection("users").doc(uid).collection("memories");
+  const keep = [];
+  for (const md of docs) {
+    if (md.data.role === "web" || !Array.isArray(md.vec)) {
+      keep.push(md);
+      continue;
+    }
+    try {
+      const near = await col
+        .findNearest({
+          vectorField: "embedding",
+          queryVector: admin.firestore.FieldValue.vector(md.vec),
+          limit: 1,
+          distanceMeasure: "COSINE",
+          distanceResultField: "_d",
+          distanceThreshold: MEMORY_DEDUP_DISTANCE,
+        })
+        .get();
+      if (!near.empty) continue; // an essentially-identical memory already exists
+    } catch (e) {
+      logger.warn("dedup check failed", { error: e.message });
+    }
+    keep.push(md);
+  }
+  return keep;
 }
 
 // Maintain a concise durable profile of the user using the cheap model.
@@ -495,6 +720,56 @@ async function handleIngest(req, res, uid) {
 }
 
 // ---------------------------------------------------------------------------
+// Confirmed actions — executed only after the user approves a proposed action.
+// ---------------------------------------------------------------------------
+async function handleAction(req, res, uid) {
+  const body = req.body || {};
+  const kind = body.kind;
+  const params = body.params || {};
+  const actionId = typeof body.actionId === "string" ? body.actionId.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 64) : "";
+  const googleToken = body.googleToken || "";
+  if (!googleToken) {
+    res.status(400).json({ error: "Google is not connected." });
+    return;
+  }
+  if (kind !== "calendar_create" && kind !== "gmail_draft") {
+    res.status(400).json({ error: "Unknown action." });
+    return;
+  }
+
+  // Idempotency: never perform the same confirmed action twice (e.g. a double-click
+  // or a re-rendered action card after switching conversations mid-run).
+  const actRef = actionId ? db.collection("users").doc(uid).collection("executedActions").doc(actionId) : null;
+  if (actRef) {
+    const prev = await actRef.get();
+    if (prev.exists) {
+      res.json({ ok: true, kind, duplicate: true, result: prev.data().result || {} });
+      return;
+    }
+  }
+
+  try {
+    const result = kind === "calendar_create" ? await calendarCreate(googleToken, params) : await gmailDraft(googleToken, params);
+    if (actRef) {
+      await actRef.set({
+        kind,
+        result,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        expireAt: admin.firestore.Timestamp.fromMillis(Date.now() + 7 * 86400000),
+      });
+    }
+    res.json({ ok: true, kind, result });
+  } catch (e) {
+    logger.warn("action failed", { kind, uid, error: e.message });
+    if (/\b40[13]\b/.test(e.message || "")) {
+      res.status(401).json({ error: "Google connection expired. Reconnect Google (Memory → Connections) and try again.", reconnect: true });
+    } else {
+      res.status(502).json({ error: "Action failed. Please try again." });
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // HTTPS entry point
 // ---------------------------------------------------------------------------
 exports.api = onRequest(
@@ -531,13 +806,22 @@ exports.api = onRequest(
       return;
     }
 
-    // --- Route: document ingestion vs chat ---
+    // --- Route: document ingestion / confirmed action / chat ---
     if (req.path && req.path.includes("/ingest")) {
       try {
         await handleIngest(req, res, uid);
       } catch (err) {
         logger.error("ingest error", { error: err.message, uid });
         if (!res.headersSent) res.status(500).json({ error: err.message || "Ingest failed" });
+      }
+      return;
+    }
+    if (req.path && req.path.includes("/action")) {
+      try {
+        await handleAction(req, res, uid);
+      } catch (err) {
+        logger.error("action error", { error: err.message, uid });
+        if (!res.headersSent) res.status(500).json({ error: err.message || "Action failed" });
       }
       return;
     }
@@ -654,8 +938,13 @@ exports.api = onRequest(
 
       const deepseekKey = DEEPSEEK_API_KEY.value();
       const tavilyKey = TAVILY_API_KEY.value();
+      // Short-lived Google OAuth token (present only if the user connected
+      // Google). Passed in the body — Google's front end strips X-Google-* headers.
+      const googleToken = (req.body && req.body.googleToken) || "";
+      const activeTools = googleToken ? [...TOOLS, ...CONNECTOR_TOOLS] : TOOLS;
       const sources = []; // deduped {title, url} across all searches
       const learned = []; // {title, url, content} from web tools → persisted to memory
+      let usedPrivateConnector = false; // gmail/calendar/drive read → don't persist this turn
 
       let assembled = "";
       let finalReasoning = "";
@@ -665,6 +954,7 @@ exports.api = onRequest(
         const { content, reasoning, toolCalls } = await streamDeepSeek({
           messages,
           apiKey: deepseekKey,
+          tools: activeTools,
           // Final round forbids tools, so the model must produce an answer
           // instead of ending the turn on an unanswerable tool_calls.
           toolChoice: isLastRound ? "none" : "auto",
@@ -690,6 +980,47 @@ exports.api = onRequest(
             args = JSON.parse(tc.function.arguments || "{}");
           } catch {
             args = {};
+          }
+
+          // ---- Google connector read tools (execute live; not persisted to memory) ----
+          if (toolName === "calendar_list" || toolName === "gmail_search" || toolName === "drive_search") {
+            usedPrivateConnector = true; // gate long-term memory + profile for this turn
+            const label =
+              toolName === "calendar_list" ? "calendar" : String(args.query || "").slice(0, 50);
+            send({ type: "tool", status: "start", name: toolName, query: label });
+            let data = [];
+            try {
+              if (toolName === "calendar_list") data = await calendarList(googleToken, args.days);
+              else if (toolName === "gmail_search") data = await gmailSearch(googleToken, String(args.query || ""));
+              else data = await driveSearch(googleToken, String(args.query || ""));
+            } catch (e) {
+              logger.warn("connector failed", { tool: toolName, error: e.message });
+              data = [{ error: "Could not reach Google. The connection may have expired — ask the user to reconnect." }];
+            }
+            send({ type: "tool", status: "done", name: toolName, query: label, count: Array.isArray(data) ? data.length : 0, sources: [] });
+            messages.push({
+              role: "tool",
+              tool_call_id: tc.id,
+              content: JSON.stringify(data && data.length ? data : [{ note: "Nothing found." }]),
+            });
+            continue;
+          }
+
+          // ---- Write actions: propose only; user must confirm via /api/action ----
+          if (toolName === "calendar_create" || toolName === "gmail_draft") {
+            const actionId = "act_" + crypto.randomBytes(6).toString("hex");
+            send({ type: "action", id: actionId, kind: toolName, params: args });
+            messages.push({
+              role: "tool",
+              tool_call_id: tc.id,
+              content: JSON.stringify([
+                {
+                  status: "pending_user_confirmation",
+                  note: "Proposed to the user. It will ONLY happen if they click Confirm. Tell the user you've prepared it and ask them to confirm — do not claim it's done.",
+                },
+              ]),
+            });
+            continue;
           }
 
           let results = [];
@@ -776,19 +1107,24 @@ exports.api = onRequest(
       // parallel. Per-doc resilient: one failed embed never drops the others,
       // and a profile-update failure leaves the existing profile untouched.
       learned.sort((a, b) => (b.source === "extract" ? 1 : 0) - (a.source === "extract" ? 1 : 0));
-      const builders = [
-        buildMemoryDoc(uid, conversationId, "user", userText),
-        buildMemoryDoc(uid, conversationId, "assistant", finalContent),
-      ];
+      const builders = [];
+      // Turns that read private Google data are NOT persisted to long-term memory
+      // or distilled into the profile (the answer can quote private email/files).
+      if (!usedPrivateConnector) {
+        builders.push(buildMemoryDoc(uid, conversationId, "user", userText));
+        builders.push(buildMemoryDoc(uid, conversationId, "assistant", finalContent));
+      }
       for (const l of learned.slice(0, MAX_WEB_MEMORIES)) {
         const text = `${l.title}\n${l.content}`.slice(0, 4000);
         builders.push(buildMemoryDoc(uid, conversationId, "web", text, l.url));
       }
       const [profileVal, memorySettled] = await Promise.all([
-        profileUpdate(profileText, userText, finalContent, deepseekKey).catch((e) => {
-          logger.warn("profile update failed", { error: e.message });
-          return null;
-        }),
+        usedPrivateConnector
+          ? Promise.resolve(null)
+          : profileUpdate(profileText, userText, finalContent, deepseekKey).catch((e) => {
+              logger.warn("profile update failed", { error: e.message });
+              return null;
+            }),
         Promise.allSettled(builders),
       ]);
       const memoryDocs = memorySettled
@@ -796,6 +1132,7 @@ exports.api = onRequest(
         .map((s) => s.value);
       const memFailed = memorySettled.filter((s) => s.status === "rejected").length;
       if (memFailed) logger.warn("memory embed partial failure", { failed: memFailed, total: builders.length });
+      const dedupedDocs = await dedupeMemories(uid, memoryDocs);
       const newProfile =
         profileVal && profileVal.trim() ? profileVal.trim().slice(0, PROFILE_MAX_CHARS) : profileText;
 
@@ -820,7 +1157,7 @@ exports.api = onRequest(
       if (!convExists) convUpdate.createdAt = admin.firestore.FieldValue.serverTimestamp();
       if (titleToSet) convUpdate.title = titleToSet;
       batch.set(convRef, convUpdate, { merge: true });
-      for (const md of memoryDocs) batch.set(md.ref, md.data);
+      for (const md of dedupedDocs) batch.set(md.ref, md.data);
       if (newProfile && newProfile !== profileText) {
         batch.set(
           db.collection("users").doc(uid),

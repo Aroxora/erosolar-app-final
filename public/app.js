@@ -4,6 +4,7 @@ import {
   getAuth,
   GoogleAuthProvider,
   signInWithPopup,
+  reauthenticateWithPopup,
   signOut,
   onAuthStateChanged,
   setPersistence,
@@ -44,7 +45,17 @@ const state = {
   messages: [],
   runs: new Map(),
   unsubConvos: null,
+  googleToken: null,
+  googleTokenExp: 0,
 };
+
+// Google connector scopes (Calendar events, Gmail read+draft, Drive read).
+const GOOGLE_SCOPES = [
+  "https://www.googleapis.com/auth/calendar.events",
+  "https://www.googleapis.com/auth/gmail.modify",
+  "https://www.googleapis.com/auth/drive.readonly",
+];
+const googleConnected = () => !!state.googleToken && Date.now() < state.googleTokenExp;
 
 const $ = (s) => document.querySelector(s);
 const els = {
@@ -125,6 +136,8 @@ onAuthStateChanged(auth, (user) => {
     state.activeId = null;
     state.messages = [];
     state.runs.clear();
+    state.googleToken = null;
+    state.googleTokenExp = 0;
     const mm = document.getElementById("memory-modal");
     if (mm) mm.hidden = true;
   }
@@ -323,6 +336,11 @@ function addMessageView(msg) {
     body.appendChild(content);
     msg._contentEl = content;
 
+    const actions = document.createElement("div");
+    actions.className = "actions";
+    body.appendChild(actions);
+    msg._actionsEl = actions;
+
     const sources = document.createElement("div");
     sources.className = "sources";
     body.appendChild(sources);
@@ -336,6 +354,7 @@ function addMessageView(msg) {
       rbody.scrollTop = rbody.scrollHeight;
       updateReasonVisibility(msg);
       renderMemoryNote(msg);
+      (msg.actions || []).forEach((a) => renderAction(msg, a)); // re-attach pending actions
       paintAssistant(msg); // render any answer already streamed (re-attach case)
     } else {
       finalizeAssistant(msg);
@@ -403,6 +422,166 @@ function renderMemoryNote(msg) {
   if (n > 0) {
     msg._memoryEl.textContent = `🧠 Drew on ${n} note${n === 1 ? "" : "s"} from your past chats`;
   }
+}
+
+function describeAction(action) {
+  const p = action.params || {};
+  if (action.kind === "calendar_create") {
+    return `📅 Create event: "${p.summary || "Untitled"}"${p.start ? ` — ${p.start}${p.end ? " → " + p.end : ""}` : ""}`;
+  }
+  if (action.kind === "gmail_draft") {
+    return `✉️ Draft to ${p.to || "?"}: "${p.subject || "(no subject)"}"`;
+  }
+  return "Proposed action";
+}
+
+// Confirm-before-act card: the model proposed a Google action; nothing happens
+// unless the user clicks confirm (this is also the guard against an injected
+// instruction triggering an unwanted action).
+function actionOkText(action) {
+  return action.kind === "gmail_draft" ? "✓ Draft saved to Gmail" : "✓ Added to your calendar";
+}
+
+function renderAction(msg, action) {
+  if (!msg._actionsEl || action.dismissed) return;
+  const card = document.createElement("div");
+  card.className = "action-card";
+  const desc = document.createElement("div");
+  desc.className = "action-desc";
+  desc.textContent = describeAction(action);
+  card.appendChild(desc);
+  const status = document.createElement("span");
+  status.className = "action-status";
+
+  // Already executed (e.g. re-rendered after switching conversations mid-run) →
+  // static completed card, so it can never be confirmed a second time.
+  if (action.done) {
+    card.classList.add("done");
+    status.className = "action-status ok";
+    status.textContent = actionOkText(action);
+    if (action.resultLink) {
+      const a = document.createElement("a");
+      a.href = action.resultLink;
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
+      a.textContent = " · open";
+      status.appendChild(a);
+    }
+    card.appendChild(status);
+    msg._actionsEl.appendChild(card);
+    return;
+  }
+
+  const btns = document.createElement("div");
+  btns.className = "action-btns";
+  const confirm = document.createElement("button");
+  confirm.className = "act-confirm";
+  confirm.textContent = action.kind === "gmail_draft" ? "Save draft" : "Add to calendar";
+  const dismiss = document.createElement("button");
+  dismiss.className = "act-dismiss";
+  dismiss.textContent = "Dismiss";
+
+  confirm.addEventListener("click", async () => {
+    if (!googleConnected()) {
+      status.className = "action-status error";
+      status.textContent = "Reconnect Google first (open Memory → Connections).";
+      return;
+    }
+    confirm.disabled = true;
+    dismiss.disabled = true;
+    status.className = "action-status";
+    status.textContent = "Working…";
+    try {
+      const token = await auth.currentUser.getIdToken();
+      const params =
+        action.kind === "calendar_create"
+          ? { ...action.params, timeZone: action.params.timeZone || Intl.DateTimeFormat().resolvedOptions().timeZone }
+          : action.params;
+      const resp = await fetch(apiBase + "/api/action", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
+        body: JSON.stringify({ kind: action.kind, params, actionId: action.id, googleToken: state.googleToken }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        if (data.reconnect) {
+          state.googleToken = null;
+          state.googleTokenExp = 0;
+          renderConnections();
+        }
+        throw new Error(data.error || "HTTP " + resp.status);
+      }
+      action.done = true;
+      if (data.result && data.result.link) action.resultLink = data.result.link;
+      btns.remove();
+      card.classList.add("done");
+      status.className = "action-status ok";
+      status.textContent = actionOkText(action);
+      if (action.resultLink) {
+        const a = document.createElement("a");
+        a.href = action.resultLink;
+        a.target = "_blank";
+        a.rel = "noopener noreferrer";
+        a.textContent = " · open";
+        status.appendChild(a);
+      }
+    } catch (e) {
+      confirm.disabled = false;
+      dismiss.disabled = false;
+      status.className = "action-status error";
+      status.textContent = e.message;
+    }
+  });
+  dismiss.addEventListener("click", () => {
+    action.dismissed = true;
+    card.remove();
+  });
+
+  btns.appendChild(confirm);
+  btns.appendChild(dismiss);
+  card.appendChild(btns);
+  card.appendChild(status);
+  msg._actionsEl.appendChild(card);
+  scrollToBottom(false);
+}
+
+// ---- Google connections ----
+function renderConnections() {
+  const box = document.getElementById("connections");
+  if (!box) return;
+  if (googleConnected()) {
+    box.innerHTML =
+      '<div class="conn-row"><span class="conn-ok">● Google connected</span>' +
+      '<span class="conn-sub">Calendar · Gmail · Drive</span>' +
+      '<button id="google-disconnect" class="link">Disconnect</button></div>';
+    box.querySelector("#google-disconnect").addEventListener("click", () => {
+      state.googleToken = null;
+      state.googleTokenExp = 0;
+      renderConnections();
+    });
+  } else {
+    box.innerHTML =
+      '<div class="conn-row"><button id="google-connect" class="btn-connect">Connect Google</button></div>' +
+      '<p class="conn-sub">Let Erosolar use your Calendar, Gmail & Drive. It only reads on request, and any draft or event needs your explicit confirmation. The connection lasts for this session.</p>';
+    box.querySelector("#google-connect").addEventListener("click", connectGoogle);
+  }
+}
+
+async function connectGoogle() {
+  if (!auth.currentUser) return;
+  const provider = new GoogleAuthProvider();
+  GOOGLE_SCOPES.forEach((s) => provider.addScope(s));
+  try {
+    const result = await reauthenticateWithPopup(auth.currentUser, provider);
+    const cred = GoogleAuthProvider.credentialFromResult(result);
+    if (cred && cred.accessToken) {
+      state.googleToken = cred.accessToken;
+      state.googleTokenExp = Date.now() + 55 * 60 * 1000;
+    }
+  } catch (e) {
+    alert("Could not connect Google: " + (e.message || e.code || ""));
+  }
+  renderConnections();
 }
 
 function renderSources(msg) {
@@ -531,11 +710,12 @@ async function streamRun(run, text) {
     const token = await auth.currentUser.getIdToken();
     const resp = await fetch(apiBase + "/api/chat", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: "Bearer " + token,
-      },
-      body: JSON.stringify({ conversationId: convId, message: text }),
+      headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
+      body: JSON.stringify({
+        conversationId: convId,
+        message: text,
+        ...(googleConnected() ? { googleToken: state.googleToken } : {}),
+      }),
     });
     if (!resp.ok || !resp.body) {
       let detail = "HTTP " + resp.status;
@@ -635,6 +815,12 @@ function handleEvent(run, ev) {
         renderMemoryNote(msg);
       }
       break;
+    case "action":
+      // The model proposed a Google action — show a confirm card (never auto-run).
+      if (!msg.actions) msg.actions = [];
+      msg.actions.push(ev);
+      if (visible) renderAction(msg, ev);
+      break;
     case "title":
       run.title = ev.title;
       if (visible && ev.title) els.title.textContent = ev.title;
@@ -730,6 +916,7 @@ memEls.clear.addEventListener("click", clearAllMemories);
 async function openMemory() {
   if (!state.user) return;
   memEls.modal.hidden = false;
+  renderConnections();
   loadDocuments();
   memEls.profile.className = "profile-box";
   memEls.profile.textContent = "Loading…";
