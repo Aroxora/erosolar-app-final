@@ -30,13 +30,16 @@ setPersistence(auth, browserLocalPersistence).catch(() => {});
 
 // ---------------------------------------------------------------------------
 // State
+//   runs: Map<conversationId, run> — in-flight streams, one per conversation.
+//   A run keeps streaming into its data model regardless of which conversation
+//   is on screen; switching away / starting a new chat never cancels it.
 // ---------------------------------------------------------------------------
 const state = {
   user: null,
   activeId: null,
   messages: [],
+  runs: new Map(),
   unsubConvos: null,
-  sending: false,
 };
 
 const $ = (s) => document.querySelector(s);
@@ -81,6 +84,7 @@ function scrollToBottom(force) {
   const near = m.scrollHeight - m.scrollTop - m.clientHeight < 160;
   if (force || near) m.scrollTop = m.scrollHeight;
 }
+const activeBusy = () => state.activeId != null && state.runs.has(state.activeId);
 const userColRef = () => collection(db, "users", state.user.uid, "conversations");
 const convRef = (id) => doc(db, "users", state.user.uid, "conversations", id);
 const msgsColRef = (id) =>
@@ -116,6 +120,7 @@ onAuthStateChanged(auth, (user) => {
     els.login.hidden = false;
     state.activeId = null;
     state.messages = [];
+    state.runs.clear();
   }
 });
 
@@ -127,7 +132,8 @@ function subscribeConversations() {
   state.unsubConvos = onSnapshot(q, (snap) => {
     const convos = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
     renderConvList(convos);
-    if (state.activeId && !convos.some((c) => c.id === state.activeId)) {
+    // If the active conversation was deleted elsewhere (and isn't mid-run), reset.
+    if (state.activeId && !state.runs.has(state.activeId) && !convos.some((c) => c.id === state.activeId)) {
       resetToEmpty();
     }
   });
@@ -144,6 +150,14 @@ function renderConvList(convos) {
     title.className = "convo-title";
     title.textContent = c.title || "New chat";
     row.appendChild(title);
+
+    // Live indicator if this conversation is streaming.
+    if (state.runs.has(c.id)) {
+      const dot = document.createElement("span");
+      dot.className = "convo-live";
+      dot.title = "Responding…";
+      row.appendChild(dot);
+    }
 
     const del = document.createElement("button");
     del.className = "convo-del";
@@ -172,7 +186,18 @@ async function deleteConversation(id, label) {
 }
 
 // ---------------------------------------------------------------------------
-// Conversation selection
+// Composer enabled state — disabled only when the CURRENTLY VIEWED conversation
+// is mid-run (prevents a double-send in the same thread; other threads are free).
+// ---------------------------------------------------------------------------
+function updateComposer() {
+  const busy = activeBusy();
+  els.input.disabled = busy;
+  els.input.placeholder = busy ? "Erosolar is responding…" : "Message Erosolar…";
+  els.send.disabled = busy || !els.input.value.trim();
+}
+
+// ---------------------------------------------------------------------------
+// Conversation selection / rendering
 // ---------------------------------------------------------------------------
 function resetToEmpty() {
   state.activeId = null;
@@ -183,14 +208,15 @@ function resetToEmpty() {
   els.empty.hidden = false;
   highlightActive();
   closeSidebar();
+  updateComposer();
 }
 
 async function selectConversation(id, title) {
-  if (state.sending) return;
   state.activeId = id;
   els.title.textContent = title || "Erosolar";
   highlightActive();
   closeSidebar();
+  updateComposer();
 
   els.messages.innerHTML = "";
   els.empty.hidden = true;
@@ -198,6 +224,8 @@ async function selectConversation(id, title) {
 
   try {
     const snap = await getDocs(query(msgsColRef(id), orderBy("createdAt", "asc")));
+    // Guard against a fast second switch while this load was in flight.
+    if (state.activeId !== id) return;
     snap.forEach((d) => {
       const data = d.data();
       addMessageView({
@@ -207,14 +235,23 @@ async function selectConversation(id, title) {
         sources: data.sources || [],
       });
     });
-    if (state.messages.length === 0) {
-      els.messages.appendChild(els.empty);
-      els.empty.hidden = false;
-    }
-    scrollToBottom(true);
   } catch (e) {
     console.error("load messages", e);
   }
+
+  // Re-attach an in-flight run for this conversation (its turn isn't persisted
+  // until it completes, so it won't be in the loaded history).
+  if (state.activeId === id && state.runs.has(id)) {
+    const run = state.runs.get(id);
+    addMessageView(run.userMsg);
+    addMessageView(run.aMsg);
+  }
+
+  if (state.messages.length === 0) {
+    els.messages.appendChild(els.empty);
+    els.empty.hidden = false;
+  }
+  scrollToBottom(true);
 }
 
 function highlightActive() {
@@ -225,8 +262,9 @@ function highlightActive() {
 
 // ---------------------------------------------------------------------------
 // Message views
-//   User turn:      avatar + text
-//   Assistant turn: avatar + [ephemeral activity] + answer + sources + (subtle reasoning toggle)
+//   User turn:        avatar + text
+//   Assistant (live): avatar + live "thinking" panel (streamed reasoning + status)
+//   Assistant (final):avatar + answer + sources + subtle reasoning toggle
 // ---------------------------------------------------------------------------
 function addMessageView(msg) {
   if (els.empty.parentNode === els.messages) els.messages.removeChild(els.empty);
@@ -236,7 +274,7 @@ function addMessageView(msg) {
 
   const avatar = document.createElement("div");
   avatar.className = "msg-avatar";
-  avatar.textContent = msg.role === "user" ? "🙂" : "";
+  if (msg.role === "user") avatar.textContent = "🙂";
   wrap.appendChild(avatar);
 
   const body = document.createElement("div");
@@ -248,13 +286,6 @@ function addMessageView(msg) {
     content.textContent = msg.content;
     body.appendChild(content);
   } else {
-    // Ephemeral activity line (Thinking / Searching) — removed once answering.
-    const activity = document.createElement("div");
-    activity.className = "activity";
-    activity.hidden = true;
-    body.appendChild(activity);
-    msg._activityEl = activity;
-
     const content = document.createElement("div");
     content.className = "content";
     body.appendChild(content);
@@ -265,51 +296,65 @@ function addMessageView(msg) {
     body.appendChild(sources);
     msg._sourcesEl = sources;
 
-    msg._reasoningSlot = body; // reasoning toggle appended here on finalize
+    msg._body = body;
+
+    if (msg.streaming) {
+      buildLivePanel(msg);
+      updateLiveLabel(msg, msg.activityLabel || "Thinking");
+      if (msg.reasoning) {
+        msg._liveReasonEl.textContent = msg.reasoning;
+        msg._liveReasonEl.scrollTop = msg._liveReasonEl.scrollHeight;
+      }
+    } else {
+      paintAssistant(msg);
+      renderSources(msg);
+      finalizeReasoning(msg);
+    }
   }
 
   wrap.appendChild(body);
   els.messages.appendChild(wrap);
   msg._el = wrap;
   state.messages.push(msg);
-
-  if (msg.role !== "user") {
-    paintAssistant(msg);
-    if (msg.sources && msg.sources.length) renderSources(msg);
-    finalizeReasoning(msg); // for history (already-complete messages)
-  }
   return msg;
 }
 
 function paintAssistant(msg) {
-  const caret = msg.streaming && msg.content ? '<span class="caret"></span>' : "";
-  msg._contentEl.innerHTML = renderMarkdown(msg.content) + caret;
+  msg._contentEl.innerHTML = renderMarkdown(msg.content);
   msg._contentEl.querySelectorAll("a").forEach((a) => {
     a.target = "_blank";
     a.rel = "noopener noreferrer";
   });
 }
 
-// One small, transient status line. Idempotent: only rebuilds when needed so
-// the spinner animation stays continuous as the label updates.
-function setActivity(msg, label) {
-  if (!msg._activityEl) return;
-  if (msg._activityLabel === label && !msg._activityEl.hidden) return;
-  if (msg._activityEl.hidden || !msg._activityEl.firstChild) {
-    msg._activityEl.hidden = false;
-    msg._activityEl.innerHTML =
-      '<span class="spinner" aria-hidden="true"></span><span class="act-label"></span>';
-  }
-  msg._activityEl.querySelector(".act-label").textContent = label;
-  msg._activityLabel = label;
-  scrollToBottom(false);
+// ---- live "thinking" panel: shows what is being thought + current activity ----
+function buildLivePanel(msg) {
+  const live = document.createElement("div");
+  live.className = "live";
+  const head = document.createElement("div");
+  head.className = "live-head";
+  head.innerHTML = '<span class="spinner" aria-hidden="true"></span><span class="live-label"></span>';
+  const reason = document.createElement("div");
+  reason.className = "live-reason";
+  live.appendChild(head);
+  live.appendChild(reason);
+  // Live panel sits above the (still-empty) answer.
+  msg._body.insertBefore(live, msg._contentEl);
+  msg._liveEl = live;
+  msg._liveLabelEl = head.querySelector(".live-label");
+  msg._liveReasonEl = reason;
 }
-function clearActivity(msg) {
-  if (msg._activityEl) {
-    msg._activityEl.hidden = true;
-    msg._activityEl.innerHTML = "";
-    msg._activityLabel = null;
-  }
+function updateLiveLabel(msg, label) {
+  if (msg._liveLabelEl) msg._liveLabelEl.textContent = label;
+}
+function appendLiveReason(msg, delta) {
+  if (!msg._liveReasonEl || !delta) return;
+  msg._liveReasonEl.textContent += delta;
+  msg._liveReasonEl.scrollTop = msg._liveReasonEl.scrollHeight;
+}
+function removeLivePanel(msg) {
+  if (msg._liveEl && msg._liveEl.parentNode) msg._liveEl.parentNode.removeChild(msg._liveEl);
+  msg._liveEl = msg._liveLabelEl = msg._liveReasonEl = null;
 }
 
 function renderSources(msg) {
@@ -332,9 +377,9 @@ function renderSources(msg) {
   });
 }
 
-// Subtle, collapsed-by-default reasoning toggle (only if reasoning exists).
+// Subtle collapsed reasoning toggle for the finished message.
 function finalizeReasoning(msg) {
-  if (!msg._reasoningSlot || msg._reasoningBuilt) return;
+  if (!msg._body || msg._reasoningBuilt) return;
   const text = (msg.reasoning || "").trim();
   if (!text) return;
   msg._reasoningBuilt = true;
@@ -347,18 +392,20 @@ function finalizeReasoning(msg) {
   bodyEl.textContent = text;
   det.appendChild(sum);
   det.appendChild(bodyEl);
-  msg._reasoningSlot.appendChild(det);
+  msg._body.appendChild(det);
+}
+
+// Render the finished answer (the one useful part), exactly once.
+function finalizeAssistant(msg) {
+  removeLivePanel(msg);
+  paintAssistant(msg);
+  renderSources(msg);
+  finalizeReasoning(msg);
 }
 
 // ---------------------------------------------------------------------------
-// Sending + streaming
+// Sending + streaming (per-conversation, concurrent)
 // ---------------------------------------------------------------------------
-function setSending(on) {
-  state.sending = on;
-  els.send.disabled = on || !els.input.value.trim();
-  els.input.disabled = on;
-}
-
 async function ensureConversation() {
   if (state.activeId) return state.activeId;
   const ref = await addDoc(userColRef(), {
@@ -372,29 +419,43 @@ async function ensureConversation() {
 }
 
 async function sendMessage(text) {
-  if (state.sending || !text.trim()) return;
-  setSending(true);
+  if (activeBusy() || !text.trim()) return;
 
   let convId;
   try {
     convId = await ensureConversation();
   } catch (e) {
-    setSending(false);
     alert("Could not start a conversation: " + e.message);
     return;
   }
 
-  addMessageView({ role: "user", content: text });
-  const aMsg = addMessageView({
+  const userMsg = { role: "user", content: text };
+  const aMsg = {
     role: "assistant",
     content: "",
     reasoning: "",
     sources: [],
     streaming: true,
-  });
-  setActivity(aMsg, "Thinking");
-  scrollToBottom(true);
+    convId,
+    activityLabel: "Thinking",
+  };
+  const run = { convId, userMsg, aMsg };
+  state.runs.set(convId, run);
 
+  // Render optimistically if this conversation is on screen.
+  if (state.activeId === convId) {
+    addMessageView(userMsg);
+    addMessageView(aMsg);
+    scrollToBottom(true);
+  }
+  updateComposer();
+  refreshConvLiveDot(convId);
+
+  streamRun(run, text); // fire-and-forget; lifecycle handled inside
+}
+
+async function streamRun(run, text) {
+  const { convId, aMsg } = run;
   try {
     const token = await auth.currentUser.getIdToken();
     const resp = await fetch(apiBase + "/api/chat", {
@@ -431,57 +492,79 @@ async function sendMessage(text) {
         } catch {
           continue;
         }
-        handleEvent(aMsg, ev);
+        handleEvent(run, ev);
       }
     }
   } catch (err) {
     aMsg.content += (aMsg.content ? "\n\n" : "") + "⚠️ " + (err.message || "Something went wrong.");
   } finally {
-    // Render the one useful part — the final, complete answer — exactly once.
     aMsg.streaming = false;
-    clearActivity(aMsg);
-    paintAssistant(aMsg);
-    renderSources(aMsg);
-    finalizeReasoning(aMsg);
-    setSending(false);
-    els.input.focus();
-    scrollToBottom(true);
+    state.runs.delete(convId);
+    if (state.activeId === convId) {
+      finalizeAssistant(aMsg);
+      scrollToBottom(true);
+      updateComposer();
+      els.input.focus();
+    }
+    refreshConvLiveDot(convId);
   }
 }
 
-function handleEvent(aMsg, ev) {
+function handleEvent(run, ev) {
+  const msg = run.aMsg;
+  const visible = state.activeId === run.convId; // only touch the DOM when on screen
   switch (ev.type) {
     case "reasoning":
-      // Captured for the optional toggle; never shown while working.
-      aMsg.reasoning += ev.delta || "";
-      if (!aMsg.content) setActivity(aMsg, "Thinking");
-      break;
-    case "content":
-      // Accumulate silently — the answer is rendered once, complete, at the end.
-      // The live activity line is what tells the user it's working.
-      if (!aMsg.content) setActivity(aMsg, "Writing the answer");
-      aMsg.content += ev.delta || "";
+      // Show what's being thought, live.
+      msg.reasoning += ev.delta || "";
+      msg.activityLabel = "Thinking";
+      if (visible) {
+        updateLiveLabel(msg, "Thinking");
+        appendLiveReason(msg, ev.delta || "");
+      }
       break;
     case "tool":
-      setActivity(
-        aMsg,
+      msg.activityLabel =
         ev.status === "start"
           ? ev.query
-            ? `Searching · ${truncate(ev.query, 48)}`
+            ? `Searching · ${truncate(ev.query, 56)}`
             : "Searching the web"
-          : "Reading results"
-      );
+          : "Reading results";
+      if (visible) updateLiveLabel(msg, msg.activityLabel);
+      break;
+    case "content":
+      // Accumulate silently; the answer is rendered once, complete, at the end.
+      if (!msg.content) msg.activityLabel = "Writing the answer";
+      msg.content += ev.delta || "";
+      if (visible) updateLiveLabel(msg, msg.activityLabel);
       break;
     case "title":
-      if (ev.title) els.title.textContent = ev.title;
+      run.title = ev.title;
+      if (visible && ev.title) els.title.textContent = ev.title;
       break;
     case "done":
-      aMsg.id = ev.messageId;
-      if (ev.sources && ev.sources.length) aMsg.sources = ev.sources;
+      msg.id = ev.messageId;
+      if (ev.sources && ev.sources.length) msg.sources = ev.sources;
       break;
     case "error":
-      aMsg.content += (aMsg.content ? "\n\n" : "") + "⚠️ " + (ev.message || "Error");
+      msg.content += (msg.content ? "\n\n" : "") + "⚠️ " + (ev.message || "Error");
       break;
+  }
+}
+
+// Toggle the little "responding" dot on a conversation row without a full relist.
+function refreshConvLiveDot(convId) {
+  const row = els.convList.querySelector(`.convo[data-id="${CSS.escape(convId)}"]`);
+  if (!row) return;
+  const existing = row.querySelector(".convo-live");
+  const running = state.runs.has(convId);
+  if (running && !existing) {
+    const dot = document.createElement("span");
+    dot.className = "convo-live";
+    dot.title = "Responding…";
+    row.insertBefore(dot, row.querySelector(".convo-del"));
+  } else if (!running && existing) {
+    existing.remove();
   }
 }
 
@@ -494,7 +577,7 @@ function autosize() {
 }
 els.input.addEventListener("input", () => {
   autosize();
-  els.send.disabled = state.sending || !els.input.value.trim();
+  els.send.disabled = activeBusy() || !els.input.value.trim();
 });
 els.input.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) {
@@ -505,21 +588,21 @@ els.input.addEventListener("keydown", (e) => {
 els.form.addEventListener("submit", (e) => {
   e.preventDefault();
   const text = els.input.value.trim();
-  if (!text) return;
+  if (!text || activeBusy()) return;
   els.input.value = "";
   autosize();
-  els.send.disabled = true;
   sendMessage(text);
 });
+
+// "New chat" always starts a fresh conversation (allowed even while others run).
 els.newChat.addEventListener("click", () => {
-  if (state.sending) return;
   resetToEmpty();
   els.input.focus();
 });
 
 document.addEventListener("click", (e) => {
   const chip = e.target.closest(".chip-suggest");
-  if (chip && !state.sending) {
+  if (chip && !activeBusy()) {
     els.input.value = chip.textContent;
     autosize();
     els.form.requestSubmit();
