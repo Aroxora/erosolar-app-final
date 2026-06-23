@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#17120c" />
+    <title>Erosolar</title>
+    <meta name="description" content="Erosolar — an AI assistant powered by DeepSeek v4 Pro with live web search." />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Ccircle cx='12' cy='12' r='5' fill='%23f6a623'/%3E%3Cg stroke='%23f6a623' stroke-width='2' stroke-linecap='round'%3E%3Cpath d='M12 1v3M12 20v3M1 12h3M20 12h3M4 4l2 2M18 18l2 2M20 4l-2 2M6 18l-2 2'/%3E%3C/g%3E%3C/svg%3E" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="./styles.css" />
+    <!-- Markdown rendering + sanitization (assistant output is untrusted HTML) -->
+    <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
+  </head>
+  <body>
+    <!-- ===================== Login ===================== -->
+    <div id="login" class="login" hidden>
+      <div class="login-card">
+        <div class="brand">
+          <span class="sun" aria-hidden="true"></span>
+          <h1>Erosolar</h1>
+        </div>
+        <p class="tagline">An AI assistant powered by <strong>DeepSeek&nbsp;v4&nbsp;Pro</strong> with live web search.</p>
+        <button id="google-signin" class="btn-google">
+          <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true">
+            <path fill="#4285F4" d="M17.64 9.2c0-.64-.06-1.25-.16-1.84H9v3.48h4.84a4.14 4.14 0 0 1-1.8 2.72v2.26h2.92c1.71-1.57 2.68-3.89 2.68-6.62z"/>
+            <path fill="#34A853" d="M9 18c2.43 0 4.47-.8 5.96-2.18l-2.92-2.26c-.8.54-1.84.86-3.04.86-2.34 0-4.32-1.58-5.03-3.71H.96v2.33A9 9 0 0 0 9 18z"/>
+            <path fill="#FBBC05" d="M3.97 10.71A5.41 5.41 0 0 1 3.68 9c0-.59.1-1.17.29-1.71V4.96H.96A9 9 0 0 0 0 9c0 1.45.35 2.83.96 4.04l3.01-2.33z"/>
+            <path fill="#EA4335" d="M9 3.58c1.32 0 2.5.45 3.44 1.35l2.58-2.59A9 9 0 0 0 9 0 9 9 0 0 0 .96 4.96l3.01 2.33C4.68 5.16 6.66 3.58 9 3.58z"/>
+          </svg>
+          Continue with Google
+        </button>
+        <p class="login-foot">Your chats are saved securely to your account.</p>
+      </div>
+    </div>
+
+    <!-- ===================== App ===================== -->
+    <div id="app" class="app" hidden>
+      <aside id="sidebar" class="sidebar">
+        <div class="sidebar-head">
+          <div class="brand brand-sm">
+            <span class="sun" aria-hidden="true"></span>
+            <span>Erosolar</span>
+          </div>
+          <button id="new-chat" class="btn-new" title="New chat">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+            New chat
+          </button>
+        </div>
+        <nav id="conversation-list" class="convos" aria-label="Conversations"></nav>
+        <div class="sidebar-foot">
+          <img id="user-photo" class="avatar-img" alt="" />
+          <div class="user-meta">
+            <span id="user-name" class="user-name"></span>
+            <button id="signout" class="link">Sign out</button>
+          </div>
+        </div>
+      </aside>
+
+      <main class="chat">
+        <header class="chat-head">
+          <button id="menu-toggle" class="icon-btn" aria-label="Toggle sidebar">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+          </button>
+          <h2 id="chat-title" class="chat-title">Erosolar</h2>
+        </header>
+
+        <div id="messages" class="messages">
+          <div id="empty-state" class="empty">
+            <span class="sun sun-lg" aria-hidden="true"></span>
+            <h3>How can I help?</h3>
+            <p>Ask anything. I'll search the web when I need current information.</p>
+            <div class="suggestions">
+              <button class="chip-suggest">What's new in solar panel efficiency this year?</button>
+              <button class="chip-suggest">Summarize today's top AI headlines</button>
+              <button class="chip-suggest">Explain how perovskite solar cells work</button>
+            </div>
+          </div>
+        </div>
+
+        <form id="composer" class="composer" autocomplete="off">
+          <div class="composer-inner">
+            <textarea id="input" rows="1" placeholder="Message Erosolar…" enterkeyhint="send"></textarea>
+            <button id="send" type="submit" class="send-btn" aria-label="Send" disabled>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>
+            </button>
+          </div>
+        </form>
+      </main>
+    </div>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

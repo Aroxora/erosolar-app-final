@@ -1,0 +1,21 @@
+node_modules/
+functions/node_modules/
+
+# Secrets — never commit these
+.env
+.env.*
+functions/.env
+functions/.env.*
+functions/.secret.local
+scripts/set-secrets.sh
+
+# Firebase
+.firebase/
+*-debug.log
+firebase-debug.log
+firestore-debug.log
+ui-debug.log
+
+# OS / editor
+.DS_Store
+*.log

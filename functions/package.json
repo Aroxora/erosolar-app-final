@@ -1,0 +1,14 @@
+{
+  "name": "erosolar-functions",
+  "description": "Erosolar chat backend — DeepSeek v4 Pro + Tavily web search",
+  "version": "1.0.0",
+  "private": true,
+  "main": "index.js",
+  "engines": {
+    "node": "22"
+  },
+  "dependencies": {
+    "firebase-admin": "^13.0.2",
+    "firebase-functions": "^6.1.1"
+  }
+}
