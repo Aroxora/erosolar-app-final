@@ -32,7 +32,10 @@ const TAVILY_API_KEY = defineSecret("TAVILY_API_KEY");
 // ----- Tunables -----
 const DEEPSEEK_BASE = "https://api.deepseek.com";
 const DEEPSEEK_MODEL = process.env.DEEPSEEK_MODEL || "deepseek-v4-pro";
-const MAX_HISTORY = 24; // prior messages sent to the model for context
+// Full conversation history is sent every turn. This character budget is only a
+// safety cap for pathologically long chats (oldest turns drop first); ~200k chars
+// ≈ 50k tokens, so normal conversations are included in their entirety.
+const MAX_HISTORY_CHARS = 200000;
 const MAX_INPUT_CHARS = 16000; // cap on a single user message
 const MAX_TOOL_ROUNDS = 4; // web_search iterations before forcing an answer
 const TAVILY_MAX_RESULTS = 6;
@@ -258,19 +261,26 @@ exports.api = onRequest(
     };
 
     try {
-      // Load recent history (chronological).
-      const histSnap = await msgsRef
-        .orderBy("createdAt", "desc")
-        .limit(MAX_HISTORY)
-        .get();
-      const history = histSnap.docs
+      // Load the FULL conversation history (oldest → newest) so Erosolar always
+      // considers everything said in this chat.
+      const histSnap = await msgsRef.orderBy("createdAt", "asc").get();
+      const allHistory = histSnap.docs
         .map((d) => d.data())
-        .reverse()
         .map((d) => ({
           role: d.role === "assistant" ? "assistant" : "user",
           content: typeof d.content === "string" ? d.content : "",
         }))
         .filter((m) => m.content);
+      // Keep within the context budget, preferring the most recent turns; for
+      // normal-length conversations this includes every message.
+      let budget = MAX_HISTORY_CHARS;
+      const kept = [];
+      for (let i = allHistory.length - 1; i >= 0; i--) {
+        budget -= allHistory[i].content.length;
+        if (budget < 0 && kept.length) break;
+        kept.push(allHistory[i]);
+      }
+      const history = kept.reverse();
 
       // Decide the conversation title from the first message — sent live now,
       // but persisted only on success (below) so failed turns don't litter the

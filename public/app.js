@@ -315,7 +315,7 @@ function addMessageView(msg) {
     msg._sourcesEl = sources;
 
     if (msg.streaming) {
-      det.open = true;
+      det.open = !msg.content; // open while reasoning; collapsed once the answer began
       det.classList.add("running");
       setReasonSummary(msg, msg.activityLabel || "Reasoning", true);
       rbody.textContent = msg.reasoning || "";
@@ -580,15 +580,19 @@ function handleEvent(run, ev) {
           : "Reading results";
       if (visible) setReasonSummary(msg, msg.activityLabel, true);
       break;
-    case "content":
+    case "content": {
       // Stream the answer live, as soon as tokens arrive.
-      if (!msg.content) msg.activityLabel = "Writing the answer";
+      const firstToken = !msg.content;
+      if (firstToken) msg.activityLabel = "Writing the answer";
       msg.content += ev.delta || "";
       if (visible) {
+        // Auto-collapse the reasoning log once the answer starts streaming.
+        if (firstToken && msg._reasonDetails) msg._reasonDetails.open = false;
         setReasonSummary(msg, msg.activityLabel, true);
         scheduleContentRender(msg);
       }
       break;
+    }
     case "title":
       run.title = ev.title;
       if (visible && ev.title) els.title.textContent = ev.title;
