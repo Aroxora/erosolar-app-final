@@ -857,6 +857,20 @@ exports.api = onRequest(
     const send = (obj) => {
       res.write(JSON.stringify(obj) + "\n");
     };
+    // Heartbeat: keep bytes flowing during idle gaps (web searches, model
+    // round-trips) so mobile carriers/proxies don't drop the streaming
+    // connection mid-answer ("Load failed"). The client ignores type:"ping".
+    const heartbeat = setInterval(() => {
+      try {
+        res.write('{"type":"ping"}\n');
+      } catch {
+        /* socket closed */
+      }
+    }, 5000);
+    const finish = () => {
+      clearInterval(heartbeat);
+      res.end();
+    };
 
     try {
       // Load the FULL conversation history (oldest → newest) so Erosolar always
@@ -1099,7 +1113,7 @@ exports.api = onRequest(
           type: "error",
           message: "The model finished without an answer. Please try again or rephrase.",
         });
-        res.end();
+        finish();
         return;
       }
 
@@ -1168,7 +1182,7 @@ exports.api = onRequest(
       await batch.commit();
 
       send({ type: "done", messageId: assistantRef.id, sources, memoryUsed });
-      res.end();
+      finish();
     } catch (err) {
       logger.error("chat handler error", { error: err.message, uid });
       try {
@@ -1176,7 +1190,7 @@ exports.api = onRequest(
       } catch {
         /* response already closed */
       }
-      res.end();
+      finish();
     }
   }
 );
