@@ -1,0 +1,8 @@
+# https://www.ero.solar
+User-agent: *
+Allow: /
+
+# Don't waste crawl budget on the JSON action/data endpoints.
+Disallow: /api/
+
+Sitemap: https://www.ero.solar/sitemap.xml

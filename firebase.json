@@ -16,6 +16,14 @@
       {
         "source": "**/*.@(js|css|svg|woff2)",
         "headers": [{ "key": "Cache-Control", "value": "public, max-age=3600" }]
+      },
+      {
+        "source": "**/*.@(png|jpg|jpeg|webp|ico)",
+        "headers": [{ "key": "Cache-Control", "value": "public, max-age=86400" }]
+      },
+      {
+        "source": "/@(robots.txt|sitemap.xml)",
+        "headers": [{ "key": "Cache-Control", "value": "public, max-age=3600" }]
       }
     ]
   },

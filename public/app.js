@@ -4,6 +4,7 @@ import {
   getAuth,
   GoogleAuthProvider,
   signInWithPopup,
+  getAdditionalUserInfo,
   signInWithCredential,
   reauthenticateWithPopup,
   signOut,
@@ -34,6 +35,70 @@ const db = getFirestore(app);
 const provider = new GoogleAuthProvider();
 setPersistence(auth, browserLocalPersistence).catch(() => {});
 
+// ---------------------------------------------------------------------------
+// Analytics (GA4 via Firebase)
+//   Loaded lazily and gated on isSupported() so it's a clean no-op where GA4
+//   can't run — notably the native iOS WKWebView wrapper and cookie-blocked
+//   browsers — instead of throwing. track()/identify() are safe to call before
+//   init resolves: events are queued (bounded) and the user id is applied once
+//   Analytics is ready. We never let analytics block or break the app.
+// ---------------------------------------------------------------------------
+let _analytics = null;
+let _logEvent = null;
+let _setUserId = null;
+let _analyticsReady = false;
+let _lastUid = null;
+const _eventQueue = [];
+
+async function initAnalytics() {
+  try {
+    const mod = await import(
+      "https://www.gstatic.com/firebasejs/10.14.1/firebase-analytics.js"
+    );
+    if (await mod.isSupported()) {
+      _analytics = mod.getAnalytics(app);
+      _logEvent = mod.logEvent;
+      _setUserId = mod.setUserId;
+      if (_lastUid != null) {
+        try {
+          _setUserId(_analytics, _lastUid);
+        } catch {}
+      }
+      for (const [name, params] of _eventQueue) {
+        try {
+          _logEvent(_analytics, name, params);
+        } catch {}
+      }
+    }
+  } catch {
+    // Analytics is best-effort; swallow load/init failures.
+  }
+  _analyticsReady = true;
+  _eventQueue.length = 0;
+}
+
+function track(name, params) {
+  const p = params || {};
+  if (_analytics && _logEvent) {
+    try {
+      _logEvent(_analytics, name, p);
+    } catch {}
+    return;
+  }
+  if (!_analyticsReady && _eventQueue.length < 50) _eventQueue.push([name, p]);
+}
+
+function identify(user) {
+  _lastUid = user ? user.uid : null;
+  if (_analytics && _setUserId) {
+    try {
+      _setUserId(_analytics, _lastUid);
+    } catch {}
+  }
+}
+
+initAnalytics();
+
 // Native iOS wrapper bridge: Google blocks OAuth popups inside WKWebView, so the
 // Erosolar iOS app signs in natively and hands us the Google credential here.
 const isNativeWrapper = () =>
@@ -41,6 +106,7 @@ const isNativeWrapper = () =>
 window.__erosolarGoogleCredential = async (idToken, accessToken) => {
   try {
     await signInWithCredential(auth, GoogleAuthProvider.credential(idToken, accessToken || null));
+    track("login", { method: "google", via: "native" });
   } catch (e) {
     alert("Sign-in failed: " + (e.message || e.code));
   }
@@ -52,6 +118,7 @@ window.__erosolarGoogleError = (msg) => {
 window.__erosolarGoogleConnect = (accessToken, expiresIn) => {
   state.googleToken = accessToken;
   state.googleTokenExp = Date.now() + Math.max(60, (Number(expiresIn) || 3300) - 300) * 1000;
+  track("connect_google", { via: "native" });
   renderConnections();
 };
 
@@ -137,15 +204,21 @@ els.googleSignin.addEventListener("click", async () => {
     return;
   }
   try {
-    await signInWithPopup(auth, provider);
+    const result = await signInWithPopup(auth, provider);
+    track("login", { method: "google", via: "popup" });
+    if (getAdditionalUserInfo(result)?.isNewUser) track("sign_up", { method: "google" });
   } catch (e) {
     alert("Sign-in failed: " + (e.message || e.code));
   }
 });
-els.signout.addEventListener("click", () => signOut(auth));
+els.signout.addEventListener("click", () => {
+  track("logout");
+  signOut(auth);
+});
 
 onAuthStateChanged(auth, (user) => {
   state.user = user;
+  identify(user);
   if (state.unsubConvos) {
     state.unsubConvos();
     state.unsubConvos = null;
@@ -609,6 +682,7 @@ async function connectGoogle() {
     if (cred && cred.accessToken) {
       state.googleToken = cred.accessToken;
       state.googleTokenExp = Date.now() + 55 * 60 * 1000;
+      track("connect_google", { via: "popup" });
     }
   } catch (e) {
     alert("Could not connect Google: " + (e.message || e.code || ""));
@@ -696,6 +770,7 @@ async function ensureConversation() {
     updatedAt: serverTimestamp(),
   });
   state.activeId = ref.id;
+  track("conversation_started");
   highlightActive();
   return ref.id;
 }
@@ -710,6 +785,7 @@ async function sendMessage(text) {
     alert("Could not start a conversation: " + e.message);
     return;
   }
+  track("message_sent", { length: text.length });
 
   const userMsg = { role: "user", content: text };
   const aMsg = {
@@ -913,6 +989,7 @@ els.form.addEventListener("submit", (e) => {
 
 // "New chat" always starts a fresh conversation (allowed even while others run).
 els.newChat.addEventListener("click", () => {
+  track("new_chat");
   resetToEmpty();
   els.input.focus();
 });
@@ -920,6 +997,7 @@ els.newChat.addEventListener("click", () => {
 document.addEventListener("click", (e) => {
   const chip = e.target.closest(".chip-suggest");
   if (chip && !activeBusy()) {
+    track("chip_suggest");
     els.input.value = chip.textContent;
     autosize();
     els.form.requestSubmit();
@@ -1136,11 +1214,18 @@ async function ingestFile(file) {
     });
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) throw new Error(data.error || "HTTP " + resp.status);
+    track("document_upload", {
+      chunks: Number(data.chunks) || 0,
+      // Extension only — never the filename. A dotless name has no extension, so
+      // send a sentinel rather than leaking the name's first chars into GA4.
+      type: file.name.includes(".") ? file.name.split(".").pop().toLowerCase().slice(0, 8) : "none",
+    });
     showUpload(`✓ Added ${truncate(file.name, 40)} · ${data.chunks} excerpt${data.chunks === 1 ? "" : "s"}`, "ok");
     hideUploadLater(5000);
     const modal = document.getElementById("memory-modal");
     if (modal && !modal.hidden) loadDocuments();
   } catch (e) {
+    track("document_upload_failed");
     showUpload("Indexing failed: " + e.message, "error");
     hideUploadLater(5000);
   }
