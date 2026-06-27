@@ -2,7 +2,7 @@
 
 *Erosolar is the AI assistant built by **ErosolarAI**, the company behind it.*
 
-A clean, fast AI assistant on **Firebase Hosting**, served at **www.ero.solar** — and as a native **iOS** app.
+A clean, fast AI assistant on **Firebase Hosting**, served at **www.ero.solar** — with a native **iOS** app coming soon.
 
 - **Model:** DeepSeek **v4 Pro** — a reasoning model that *shows its thinking* before it answers
 - **Live web search:** Tavily, exposed to the model as a `web_search` tool it calls on demand (multi-round)
