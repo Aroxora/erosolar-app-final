@@ -1,5 +1,18 @@
 {
   "projects": {
     "default": "erosolar-coder-506ae"
-  }
+  },
+  "targets": {
+    "erosolar-coder-506ae": {
+      "hosting": {
+        "app": [
+          "erosolar-coder-506ae"
+        ],
+        "corporate": [
+          "erosolarai-corp"
+        ]
+      }
+    }
+  },
+  "etags": {}
 }
