@@ -217,6 +217,9 @@ els.signout.addEventListener("click", () => {
 });
 
 onAuthStateChanged(auth, (user) => {
+  // Auth state known — drop the first-paint splash and show the real UI.
+  const splash = document.getElementById("splash");
+  if (splash) splash.hidden = true;
   state.user = user;
   identify(user);
   if (state.unsubConvos) {
@@ -1353,3 +1356,14 @@ els.menuToggle.addEventListener("click", () => {
     closeSidebar();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Service worker — app-shell cache for fast repeat loads + offline support.
+// Best-effort: if it's unsupported or registration fails, the app runs exactly
+// as before (no precache, no offline) — nothing here can break normal loads.
+// ---------------------------------------------------------------------------
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("./sw.js").catch(() => {});
+  });
+}

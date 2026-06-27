@@ -70,15 +70,47 @@
         }
       }
     </script>
+    <!-- Critical path: warm the origins app.js hits immediately, and preload the
+         Firebase modules it imports so they download in parallel with app.js. -->
+    <link rel="preconnect" href="https://www.gstatic.com" crossorigin />
+    <link rel="preconnect" href="https://api-jtgd5ydvyq-uc.a.run.app" />
+    <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin />
+    <link rel="dns-prefetch" href="https://firestore.googleapis.com" />
+    <link rel="dns-prefetch" href="https://identitytoolkit.googleapis.com" />
+    <link rel="modulepreload" href="https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js" crossorigin />
+    <link rel="modulepreload" href="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js" crossorigin />
+    <link rel="modulepreload" href="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js" crossorigin />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="./styles.css" />
-    <!-- Markdown rendering + sanitization (assistant output is untrusted HTML) -->
-    <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
+    <!-- Markdown rendering + sanitization (assistant output is untrusted HTML).
+         Deferred: only needed once an answer renders, long after first paint. -->
+    <script defer src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
   </head>
   <body>
+    <!-- First-paint shell: a branded splash shown until auth state resolves, so the
+         page shows the logo instantly instead of a blank screen while Firebase reads
+         the persisted session. app.js removes it in onAuthStateChanged. -->
+    <div id="splash" class="splash" aria-hidden="true">
+      <img src="./icon-512.png" alt="" width="72" height="72" />
+    </div>
+    <script>
+      // First-paint failsafe — a classic inline script so it runs even if the app
+      // module fails to load (e.g. Firebase modules unreachable): after 8s, drop the
+      // splash and reveal the login screen rather than stranding the user on it.
+      setTimeout(function () {
+        var s = document.getElementById("splash");
+        if (s && !s.hasAttribute("hidden")) {
+          s.setAttribute("hidden", "");
+          var login = document.getElementById("login");
+          var app = document.getElementById("app");
+          if (login && app && app.hasAttribute("hidden")) login.removeAttribute("hidden");
+        }
+      }, 8000);
+    </script>
+
     <!-- ===================== Login ===================== -->
     <div id="login" class="login" hidden>
       <div class="login-card">

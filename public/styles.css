@@ -372,6 +372,17 @@ body {
 /* Stop mode: the send button becomes a stop control while a response streams. */
 .send-btn.stop { background: var(--danger); color: #fff; }
 .send-btn.stop:hover:not(:disabled) { background: #ff8585; }
+
+/* First-paint splash — shown until auth resolves, then removed by app.js. */
+.splash {
+  position: fixed; inset: 0; z-index: 50;
+  display: grid; place-items: center;
+  background: radial-gradient(900px 600px at 50% 32%, #1a1a38 0%, var(--bg) 62%);
+}
+.splash[hidden] { display: none; } /* override .splash display so [hidden] works */
+.splash img { width: 72px; height: 72px; border-radius: 18px; animation: splashpulse 1.4s ease-in-out infinite; }
+@keyframes splashpulse { 0%, 100% { opacity: 0.55; transform: scale(0.97); } 50% { opacity: 1; transform: scale(1); } }
+@media (prefers-reduced-motion: reduce) { .splash img { animation: none; } }
 .attach-btn {
   flex: none; width: 40px; height: 44px; border-radius: 10px;
   background: none; border: none; color: var(--text-faint); cursor: pointer;

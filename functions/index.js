@@ -41,7 +41,8 @@ const MAX_INPUT_CHARS = 16000; // cap on a single user message
 const MAX_TOOL_ROUNDS = 4; // web_search iterations before forcing an answer
 const TAVILY_MAX_RESULTS = 6;
 const TAVILY_MAX_EXTRACT_URLS = 5; // pages per web_extract call
-const TAVILY_EXTRACT_CHARS = 3000; // per-page text fed to the model (re-billed each round)
+const TAVILY_EXTRACT_CHARS = 3000; // per-page text fed to the model (full for the next round)
+const TOOL_REBILL_TRIM_CHARS = 600; // prior rounds' tool replies compacted to this (anti re-billing)
 const TAVILY_EXTRACT_MEMORY_CHARS = 6000; // richer text kept for long-term memory
 const MAX_WEB_MEMORIES = 6; // web facts persisted to memory per turn
 const MEMORY_TTL_DAYS = 120; // memories age out via a Firestore TTL policy on expireAt
@@ -241,6 +242,31 @@ function rateAcquire(uid) {
 // so the real cause stays findable in Cloud Logging.
 function friendlyError(reqId) {
   return `Something went wrong on our end. Please try again. (ref: ${reqId})`;
+}
+
+// Compact prior tool replies in-place: shrink each result's `content` field to
+// `keepChars` so a multi-round tool turn doesn't re-send (and re-pay for) full page
+// text on every later round. Keeps valid JSON plus the title/url/n for reference;
+// the most recent round's results are left full (compacted only on the next round).
+function compactToolMessages(messages, keepChars) {
+  for (const m of messages) {
+    if (m.role !== "tool" || typeof m.content !== "string") continue;
+    let arr;
+    try {
+      arr = JSON.parse(m.content);
+    } catch {
+      continue;
+    }
+    if (!Array.isArray(arr)) continue;
+    let changed = false;
+    for (const r of arr) {
+      if (r && typeof r.content === "string" && r.content.length > keepChars) {
+        r.content = r.content.slice(0, keepChars) + "…";
+        changed = true;
+      }
+    }
+    if (changed) m.content = JSON.stringify(arr);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1291,6 +1317,10 @@ exports.api = onRequest(
 
         const wantsTools = toolCalls.length > 0 && !isLastRound;
         if (!wantsTools) break;
+
+        // Cost: compact PRIOR rounds' tool replies (the model already reasoned over
+        // them) so full page text isn't re-sent — and re-billed — every later round.
+        compactToolMessages(messages, TOOL_REBILL_TRIM_CHARS);
 
         // Record the assistant's tool-call turn, then run each search.
         messages.push({ role: "assistant", content: content || "", tool_calls: toolCalls });
