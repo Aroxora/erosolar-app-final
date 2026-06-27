@@ -17,6 +17,7 @@ import {
   collection,
   doc,
   addDoc,
+  setDoc,
   getDoc,
   getDocs,
   deleteDoc,
@@ -1375,6 +1376,8 @@ async function openMemory() {
 
   try {
     const snap = await getDoc(doc(db, "users", state.user.uid));
+    const ci = document.getElementById("custom-instructions");
+    if (ci) ci.value = snap.exists() ? snap.data().customInstructions || "" : "";
     const profile = snap.exists() ? snap.data().profile || "" : "";
     if (profile.trim()) {
       memEls.profile.innerHTML = renderMarkdown(profile);
@@ -1711,3 +1714,18 @@ document.getElementById("export-chat")?.addEventListener("click", exportConversa
   });
   jb.addEventListener("click", () => scrollToBottom(true));
 })();
+
+// ---------------------------------------------------------------------------
+// Custom instructions — always-on guidance saved from the Memory panel.
+// ---------------------------------------------------------------------------
+document.getElementById("ci-save")?.addEventListener("click", async () => {
+  if (!state.user) return;
+  const ci = document.getElementById("custom-instructions");
+  if (!ci) return;
+  try {
+    await setDoc(doc(db, "users", state.user.uid), { customInstructions: ci.value.trim().slice(0, 2000) }, { merge: true });
+    toast("Custom instructions saved");
+  } catch (e) {
+    toast("Could not save: " + (e.message || ""), "error");
+  }
+});

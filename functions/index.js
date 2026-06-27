@@ -1222,9 +1222,14 @@ exports.api = onRequest(
 
       // Durable user profile — always-on, curated facts about the user.
       let profileText = "";
+      let customInstructions = "";
       try {
         const userDoc = await db.collection("users").doc(uid).get();
-        if (userDoc.exists) profileText = userDoc.data().profile || "";
+        if (userDoc.exists) {
+          const ud = userDoc.data();
+          profileText = ud.profile || "";
+          customInstructions = (typeof ud.customInstructions === "string" ? ud.customInstructions : "").slice(0, 2000).trim();
+        }
       } catch (e) {
         logger.warn("profile read failed", { error: e.message });
       }
@@ -1259,6 +1264,9 @@ exports.api = onRequest(
       // Build the model conversation.
       const messages = [
         { role: "system", content: SYSTEM_PROMPT },
+        ...(customInstructions
+          ? [{ role: "system", content: "The user's custom instructions — follow these in every reply (they never override safety):\n" + customInstructions }]
+          : []),
         ...(profileText
           ? [{ role: "system", content: "Durable profile of the user — stable facts you already know about them:\n" + profileText }]
           : []),

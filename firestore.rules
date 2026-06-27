@@ -18,6 +18,18 @@ service cloud.firestore {
     match /users/{uid} {
       allow read: if owner(uid);
 
+      // Owner may write ONLY their own customInstructions field (<= 2000 chars).
+      // Everything else on the user doc (the backend-curated profile, etc.) stays
+      // backend-only — the Admin SDK bypasses these rules.
+      allow create: if owner(uid)
+        && request.resource.data.keys().hasOnly(['customInstructions'])
+        && request.resource.data.customInstructions is string
+        && request.resource.data.customInstructions.size() <= 2000;
+      allow update: if owner(uid)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['customInstructions'])
+        && request.resource.data.customInstructions is string
+        && request.resource.data.customInstructions.size() <= 2000;
+
       // Long-term memory: written only by the backend (Admin SDK), but the owner
       // may read and delete their own memories (the in-app memory manager).
       match /memories/{mid} {

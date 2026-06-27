@@ -519,6 +519,17 @@ body:has(#app[hidden]) .skip-link { display: none; }
 .btn-confirm:hover { background: var(--accent-2); }
 .btn-confirm.danger { background: var(--danger); color: #fff; }
 .btn-confirm.danger:hover { background: #ff8585; }
+
+/* Custom-instructions textarea (Memory panel). */
+.ci-box {
+  width: 100%; box-sizing: border-box; resize: vertical; min-height: 64px;
+  margin-top: 8px; padding: 10px 12px;
+  background: var(--bg-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 10px;
+  font: inherit; font-size: 14px; line-height: 1.5;
+}
+.ci-box:focus { outline: none; border-color: var(--accent); }
+.ci-box::placeholder { color: var(--text-faint); }
 .attach-btn {
   flex: none; width: 40px; height: 44px; border-radius: 10px;
   background: none; border: none; color: var(--text-faint); cursor: pointer;
