@@ -369,6 +369,9 @@ body {
 .send-btn:hover:not(:disabled) { background: var(--accent-2); }
 .send-btn:active:not(:disabled) { transform: translateY(1px); }
 .send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+/* Stop mode: the send button becomes a stop control while a response streams. */
+.send-btn.stop { background: var(--danger); color: #fff; }
+.send-btn.stop:hover:not(:disabled) { background: #ff8585; }
 .attach-btn {
   flex: none; width: 40px; height: 44px; border-radius: 10px;
   background: none; border: none; color: var(--text-faint); cursor: pointer;

@@ -308,11 +308,36 @@ async function deleteConversation(id, label) {
 // Composer enabled state — disabled only when the CURRENTLY VIEWED conversation
 // is mid-run (prevents a double-send in the same thread; other threads are free).
 // ---------------------------------------------------------------------------
+// The send button doubles as a Stop control while the active conversation streams.
+const SEND_ICON = els.send.innerHTML;
+const STOP_ICON =
+  '<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2.5"/></svg>';
+function setSendMode(stop) {
+  if (els.send.dataset.mode === (stop ? "stop" : "send")) return;
+  els.send.dataset.mode = stop ? "stop" : "send";
+  els.send.type = stop ? "button" : "submit"; // in stop mode the click must NOT submit
+  els.send.innerHTML = stop ? STOP_ICON : SEND_ICON;
+  els.send.classList.toggle("stop", stop);
+  els.send.setAttribute("aria-label", stop ? "Stop generating" : "Send");
+  els.send.title = stop ? "Stop generating" : "Send";
+}
+// Abort the in-flight run for the conversation currently on screen.
+function stopActiveRun() {
+  const run = state.activeId && state.runs.get(state.activeId);
+  if (run && run.controller && !run.stopped) {
+    run.stopped = true;
+    try {
+      run.controller.abort();
+    } catch {}
+  }
+}
+
 function updateComposer() {
   const busy = activeBusy();
   els.input.disabled = busy;
   els.input.placeholder = busy ? "Erosolar is responding…" : "Message Erosolar…";
-  els.send.disabled = busy || !els.input.value.trim();
+  setSendMode(busy);
+  els.send.disabled = busy ? false : !els.input.value.trim();
 }
 
 // ---------------------------------------------------------------------------
@@ -797,7 +822,7 @@ async function sendMessage(text) {
     convId,
     activityLabel: "Reasoning",
   };
-  const run = { convId, userMsg, aMsg };
+  const run = { convId, userMsg, aMsg, controller: new AbortController() };
   state.runs.set(convId, run);
 
   // Render optimistically if this conversation is on screen.
@@ -824,6 +849,7 @@ async function streamRun(run, text) {
         message: text,
         ...(googleConnected() ? { googleToken: state.googleToken } : {}),
       }),
+      signal: run.controller.signal,
     });
     if (!resp.ok || !resp.body) {
       let detail = "HTTP " + resp.status;
@@ -855,7 +881,13 @@ async function streamRun(run, text) {
       }
     }
   } catch (err) {
-    aMsg.content += (aMsg.content ? "\n\n" : "") + "⚠️ " + (err.message || "Something went wrong.");
+    if (run.stopped || err.name === "AbortError") {
+      // User hit Stop — keep whatever streamed in; mark an empty turn as stopped.
+      aMsg.stopped = true;
+      if (!aMsg.content.trim()) aMsg.content = "_Stopped._";
+    } else {
+      aMsg.content += (aMsg.content ? "\n\n" : "") + "⚠️ " + (err.message || "Something went wrong.");
+    }
   } finally {
     aMsg.streaming = false;
     state.runs.delete(convId);
@@ -985,6 +1017,14 @@ els.form.addEventListener("submit", (e) => {
   els.input.value = "";
   autosize();
   sendMessage(text);
+});
+// While streaming, the send button becomes a Stop control (type="button"): abort
+// the active run instead of submitting. In send mode this is a no-op (form submits).
+els.send.addEventListener("click", (e) => {
+  if (els.send.dataset.mode === "stop") {
+    e.preventDefault();
+    stopActiveRun();
+  }
 });
 
 // "New chat" always starts a fresh conversation (allowed even while others run).

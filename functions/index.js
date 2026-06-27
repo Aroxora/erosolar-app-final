@@ -68,6 +68,28 @@ const DOC_CHUNK_OVERLAP = 150;
 const DOC_MAX_CHUNKS = 200;
 const EMBED_BATCH = 16; // chunks per Vertex predict call
 
+// ----- Resilience & cost-governance tunables -----
+// Per-call timeouts so one black-holed upstream can't freeze a whole turn for
+// the full 300s function cap; retries turn transient 429/5xx/network blips into
+// invisible recoveries instead of failed turns.
+const FETCH_TIMEOUT = {
+  tavily: 25000,
+  google: 15000,
+  embed: 20000,
+  profile: 30000,
+  metadata: 5000,
+};
+const MAX_RETRIES = 2; // total attempts = 1 + MAX_RETRIES (idempotent calls only)
+const RETRY_BASE_MS = 400; // exponential backoff base
+const DEEPSEEK_CONNECT_MS = 30000; // headers/first-byte watchdog (NOT a stream cap)
+const MAX_OUTPUT_TOKENS = 16000; // bound a runaway generation; truncation is flagged to the user
+
+// Per-user rate limiting. In-memory + best-effort per instance; `maxInstances`
+// on the function is the global hard ceiling on concurrent paid-provider fan-out.
+const RATE_WINDOW_MS = 60000;
+const RATE_MAX_PER_WINDOW = 20; // requests per uid per minute (per instance)
+const MAX_CONCURRENT_PER_UID = 6; // simultaneous in-flight requests per uid (covers multi-chat use)
+
 const SYSTEM_PROMPT = `You are Erosolar, a sharp, friendly, and precise AI assistant.
 
 - Answer clearly and concisely. Use Markdown (headings, lists, tables, fenced code blocks) when it improves readability.
@@ -120,20 +142,126 @@ const TOOLS = [
 ];
 
 // ---------------------------------------------------------------------------
+// Resilience helpers — timeouts, retry/backoff, rate limiting, error hygiene.
+// ---------------------------------------------------------------------------
+// Cancellable sleep: resolves after `ms`, or rejects immediately if `signal` aborts.
+function sleep(ms, signal) {
+  return new Promise((resolve, reject) => {
+    let onAbort;
+    const t = setTimeout(() => {
+      if (signal && onAbort) signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    if (signal) {
+      // Remove the listener on BOTH paths so repeated sleeps (retries) don't
+      // accumulate abort listeners on a long-lived per-request signal.
+      onAbort = () => {
+        clearTimeout(t);
+        signal.removeEventListener("abort", onAbort);
+        reject(new DOMException("Aborted", "AbortError"));
+      };
+      signal.addEventListener("abort", onAbort);
+    }
+  });
+}
+
+const backoff = (attempt) => RETRY_BASE_MS * 2 ** attempt + Math.floor(Math.random() * 200);
+
+// fetch with a per-attempt timeout + retry/backoff on transient failures.
+// Combines an optional caller `signal` (client disconnect) with a fresh timeout
+// per attempt via AbortSignal.any. Retries network errors and 429/5xx (honoring
+// Retry-After) up to `retries`; never retries when the caller signal aborted.
+// NOTE: not for streaming bodies — the timeout would abort an active stream.
+async function fetchWithRetry(url, options = {}, opts = {}) {
+  const { timeoutMs = 20000, retries = MAX_RETRIES, signal, label = "request" } = opts;
+  let lastErr;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    if (signal && signal.aborted) throw new DOMException("Aborted", "AbortError");
+    const timeout = AbortSignal.timeout(timeoutMs);
+    const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
+    try {
+      const resp = await fetch(url, { ...options, signal: combined });
+      if ((resp.status === 429 || resp.status >= 500) && attempt < retries) {
+        resp.body?.cancel().catch(() => {}); // release the socket before retrying
+        const ra = Number(resp.headers.get("retry-after"));
+        const waitMs = Number.isFinite(ra) && ra > 0 ? Math.min(ra * 1000, 8000) : backoff(attempt);
+        await sleep(waitMs, signal);
+        continue;
+      }
+      return resp;
+    } catch (err) {
+      if (signal && signal.aborted) throw err; // client disconnected — stop, don't retry
+      lastErr = err;
+      if (attempt < retries) {
+        await sleep(backoff(attempt), signal);
+        continue;
+      }
+      throw new Error(`${label} failed: ${err.message || err.name}`);
+    }
+  }
+  throw lastErr || new Error(`${label} failed`);
+}
+
+// Per-uid, per-instance rate limiter. Returns { ok, reason?, release }.
+const _rate = new Map();
+let _rateCalls = 0;
+function rateAcquire(uid) {
+  const now = Date.now();
+  // Periodically evict fully-idle uids so the map can't grow unbounded over the
+  // lifetime of a warm instance (longevity: instances live for hours/days).
+  if ((++_rateCalls & 127) === 0) {
+    for (const [k, v] of _rate) {
+      if (v.inflight === 0 && (v.times.length === 0 || now - v.times[v.times.length - 1] >= RATE_WINDOW_MS)) {
+        _rate.delete(k);
+      }
+    }
+  }
+  let r = _rate.get(uid);
+  if (!r) {
+    r = { times: [], inflight: 0 };
+    _rate.set(uid, r);
+  }
+  r.times = r.times.filter((t) => now - t < RATE_WINDOW_MS);
+  if (r.inflight >= MAX_CONCURRENT_PER_UID) return { ok: false, reason: "concurrent", release: () => {} };
+  if (r.times.length >= RATE_MAX_PER_WINDOW) return { ok: false, reason: "rate", release: () => {} };
+  r.times.push(now);
+  r.inflight++;
+  let released = false;
+  return {
+    ok: true,
+    release: () => {
+      if (released) return;
+      released = true;
+      r.inflight = Math.max(0, r.inflight - 1);
+    },
+  };
+}
+
+// Client-facing error: never leak upstream provider names/bodies; keep a reqId
+// so the real cause stays findable in Cloud Logging.
+function friendlyError(reqId) {
+  return `Something went wrong on our end. Please try again. (ref: ${reqId})`;
+}
+
+// ---------------------------------------------------------------------------
 // Tavily web search
 // ---------------------------------------------------------------------------
-async function tavilySearch(queryText, apiKey) {
-  const resp = await fetch("https://api.tavily.com/search", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      api_key: apiKey,
-      query: queryText,
-      search_depth: "advanced",
-      max_results: TAVILY_MAX_RESULTS,
-      include_answer: false,
-    }),
-  });
+async function tavilySearch(queryText, apiKey, signal) {
+  const resp = await fetchWithRetry(
+    "https://api.tavily.com/search",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        api_key: apiKey,
+        query: queryText,
+        search_depth: "advanced",
+        max_results: TAVILY_MAX_RESULTS,
+        include_answer: false,
+      }),
+    },
+    { timeoutMs: FETCH_TIMEOUT.tavily, signal, label: "Tavily search" }
+  );
   if (!resp.ok) {
     const text = await resp.text().catch(() => "");
     throw new Error(`Tavily ${resp.status}: ${text.slice(0, 200)}`);
@@ -151,16 +279,20 @@ async function tavilySearch(queryText, apiKey) {
 // ---------------------------------------------------------------------------
 // Tavily extract — fetch full page text for specific URLs
 // ---------------------------------------------------------------------------
-async function tavilyExtract(urls, apiKey) {
+async function tavilyExtract(urls, apiKey, signal) {
   const list = (Array.isArray(urls) ? urls : [urls])
     .filter((u) => typeof u === "string" && /^https?:\/\//i.test(u))
     .slice(0, TAVILY_MAX_EXTRACT_URLS);
   if (!list.length) return [];
-  const resp = await fetch("https://api.tavily.com/extract", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ api_key: apiKey, urls: list, extract_depth: "basic" }),
-  });
+  const resp = await fetchWithRetry(
+    "https://api.tavily.com/extract",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ api_key: apiKey, urls: list, extract_depth: "basic" }),
+    },
+    { timeoutMs: FETCH_TIMEOUT.tavily, signal, label: "Tavily extract" }
+  );
   if (!resp.ok) {
     const text = await resp.text().catch(() => "");
     throw new Error(`Tavily extract ${resp.status}: ${text.slice(0, 200)}`);
@@ -257,7 +389,11 @@ const CONNECTOR_TOOLS = [
 ];
 
 async function googleGet(url, token) {
-  const resp = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+  const resp = await fetchWithRetry(
+    url,
+    { headers: { Authorization: `Bearer ${token}` } },
+    { timeoutMs: FETCH_TIMEOUT.google, label: "Google read" }
+  );
   if (!resp.ok) {
     const t = await resp.text().catch(() => "");
     throw new Error(`Google ${resp.status}: ${t.slice(0, 160)}`);
@@ -328,11 +464,16 @@ async function calendarCreate(token, params) {
     start: { dateTime: params.start, timeZone: params.timeZone || undefined },
     end: { dateTime: params.end, timeZone: params.timeZone || undefined },
   };
-  const resp = await fetch("https://www.googleapis.com/calendar/v3/calendars/primary/events", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  // Write action: timeout but NO retry (non-idempotent — a retry could double-create).
+  const resp = await fetchWithRetry(
+    "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+    { timeoutMs: FETCH_TIMEOUT.google, retries: 0, label: "Calendar create" }
+  );
   if (!resp.ok) {
     const t = await resp.text().catch(() => "");
     throw new Error(`Calendar ${resp.status}: ${t.slice(0, 160)}`);
@@ -355,11 +496,16 @@ async function gmailDraft(token, params) {
     bodyText,
   ].join("\r\n");
   const encoded = Buffer.from(raw, "utf8").toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-  const resp = await fetch("https://gmail.googleapis.com/gmail/v1/users/me/drafts", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ message: { raw: encoded } }),
-  });
+  // Write action: timeout but NO retry (non-idempotent — a retry could double-draft).
+  const resp = await fetchWithRetry(
+    "https://gmail.googleapis.com/gmail/v1/users/me/drafts",
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ message: { raw: encoded } }),
+    },
+    { timeoutMs: FETCH_TIMEOUT.google, retries: 0, label: "Gmail draft" }
+  );
   if (!resp.ok) {
     const t = await resp.text().catch(() => "");
     throw new Error(`Gmail ${resp.status}: ${t.slice(0, 160)}`);
@@ -373,12 +519,14 @@ async function gmailDraft(token, params) {
 // Invokes onDelta({ reasoning?, content? }) for each streamed fragment.
 // Returns { content, reasoning, toolCalls }.
 // ---------------------------------------------------------------------------
-async function streamDeepSeek({ messages, apiKey, onDelta, toolChoice = "auto", tools = TOOLS }) {
+async function streamDeepSeek({ messages, apiKey, onDelta, toolChoice = "auto", tools = TOOLS, signal }) {
   const reqBody = {
     model: DEEPSEEK_MODEL,
     messages,
     stream: true,
     temperature: 0.6,
+    max_tokens: MAX_OUTPUT_TOKENS,
+    stream_options: { include_usage: true },
   };
   // toolChoice "none" => omit tools entirely so the model must answer in text.
   if (toolChoice !== "none") {
@@ -386,16 +534,52 @@ async function streamDeepSeek({ messages, apiKey, onDelta, toolChoice = "auto", 
     reqBody.tool_choice = "auto";
   }
 
-  const resp = await fetch(`${DEEPSEEK_BASE}/chat/completions`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(reqBody),
-  });
+  // Connect with limited retries on transient failure, guarded by a first-byte
+  // watchdog — NOT a total-stream timeout (a long legit answer must not be cut).
+  // The controller stays linked to the caller `signal` so a client disconnect
+  // aborts the live body read too, stopping upstream billing the moment Stop is hit.
+  let resp;
+  let keepLinkAbort = null; // the success iteration's listener — removed after the body read
+  for (let attempt = 0; ; attempt++) {
+    if (signal && signal.aborted) throw new DOMException("Aborted", "AbortError");
+    const ctrl = new AbortController();
+    const linkAbort = () => ctrl.abort();
+    if (signal) signal.addEventListener("abort", linkAbort, { once: true });
+    const watchdog = setTimeout(
+      () => ctrl.abort(new DOMException("DeepSeek connect timeout", "TimeoutError")),
+      DEEPSEEK_CONNECT_MS
+    );
+    try {
+      resp = await fetch(`${DEEPSEEK_BASE}/chat/completions`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+        body: JSON.stringify(reqBody),
+        signal: ctrl.signal,
+      });
+    } catch (err) {
+      clearTimeout(watchdog);
+      if (signal) signal.removeEventListener("abort", linkAbort);
+      if (signal && signal.aborted) throw err; // client disconnected — stop, don't retry
+      if (attempt < MAX_RETRIES) {
+        await sleep(backoff(attempt), signal);
+        continue;
+      }
+      throw new Error(`DeepSeek connect failed: ${err.message || err.name}`);
+    }
+    clearTimeout(watchdog); // headers arrived — stop the first-byte watchdog
+    if ((resp.status === 429 || resp.status >= 500) && attempt < MAX_RETRIES) {
+      if (signal) signal.removeEventListener("abort", linkAbort);
+      resp.body?.cancel().catch(() => {}); // release the abandoned socket before retrying
+      const ra = Number(resp.headers.get("retry-after"));
+      await sleep(Number.isFinite(ra) && ra > 0 ? Math.min(ra * 1000, 8000) : backoff(attempt), signal);
+      continue;
+    }
+    keepLinkAbort = linkAbort; // success: keep linked to the caller signal for the body read
+    break;
+  }
 
   if (!resp.ok || !resp.body) {
+    if (signal && keepLinkAbort) signal.removeEventListener("abort", keepLinkAbort);
     const text = await resp.text().catch(() => "");
     throw new Error(`DeepSeek ${resp.status}: ${text.slice(0, 300)}`);
   }
@@ -405,61 +589,72 @@ async function streamDeepSeek({ messages, apiKey, onDelta, toolChoice = "auto", 
   let buffer = "";
   let content = "";
   let reasoning = "";
+  let usage = null;
+  let finishReason = "";
   const toolCallsByIndex = new Map();
 
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
 
-    let nl;
-    while ((nl = buffer.indexOf("\n")) >= 0) {
-      const line = buffer.slice(0, nl).trim();
-      buffer = buffer.slice(nl + 1);
-      if (!line.startsWith("data:")) continue;
-      const payload = line.slice(5).trim();
-      if (payload === "[DONE]") continue;
+      let nl;
+      while ((nl = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, nl).trim();
+        buffer = buffer.slice(nl + 1);
+        if (!line.startsWith("data:")) continue;
+        const payload = line.slice(5).trim();
+        if (payload === "[DONE]") continue;
 
-      let json;
-      try {
-        json = JSON.parse(payload);
-      } catch {
-        continue;
-      }
-      const delta = json.choices && json.choices[0] && json.choices[0].delta;
-      if (!delta) continue;
+        let json;
+        try {
+          json = JSON.parse(payload);
+        } catch {
+          continue;
+        }
+        if (json.usage) usage = json.usage; // final chunk carries token usage
+        const choice0 = json.choices && json.choices[0];
+        if (choice0 && choice0.finish_reason) finishReason = choice0.finish_reason;
+        const delta = choice0 && choice0.delta;
+        if (!delta) continue;
 
-      if (delta.reasoning_content) {
-        reasoning += delta.reasoning_content;
-        onDelta({ reasoning: delta.reasoning_content });
-      }
-      if (delta.content) {
-        content += delta.content;
-        onDelta({ content: delta.content });
-      }
-      if (Array.isArray(delta.tool_calls)) {
-        for (const tc of delta.tool_calls) {
-          const idx = typeof tc.index === "number" ? tc.index : 0;
-          const acc =
-            toolCallsByIndex.get(idx) || {
-              id: "",
-              type: "function",
-              function: { name: "", arguments: "" },
-            };
-          if (tc.id) acc.id = tc.id;
-          if (tc.function && tc.function.name) acc.function.name = tc.function.name;
-          if (tc.function && tc.function.arguments)
-            acc.function.arguments += tc.function.arguments;
-          toolCallsByIndex.set(idx, acc);
+        if (delta.reasoning_content) {
+          reasoning += delta.reasoning_content;
+          onDelta({ reasoning: delta.reasoning_content });
+        }
+        if (delta.content) {
+          content += delta.content;
+          onDelta({ content: delta.content });
+        }
+        if (Array.isArray(delta.tool_calls)) {
+          for (const tc of delta.tool_calls) {
+            const idx = typeof tc.index === "number" ? tc.index : 0;
+            const acc =
+              toolCallsByIndex.get(idx) || {
+                id: "",
+                type: "function",
+                function: { name: "", arguments: "" },
+              };
+            if (tc.id) acc.id = tc.id;
+            if (tc.function && tc.function.name) acc.function.name = tc.function.name;
+            if (tc.function && tc.function.arguments)
+              acc.function.arguments += tc.function.arguments;
+            toolCallsByIndex.set(idx, acc);
+          }
         }
       }
     }
+  } finally {
+    // Body read finished (or threw/aborted) — detach the caller-signal listener so
+    // it can't accumulate across the up-to-5 streamDeepSeek calls per request.
+    if (signal && keepLinkAbort) signal.removeEventListener("abort", keepLinkAbort);
   }
 
   const toolCalls = [...toolCallsByIndex.values()].filter(
     (t) => t.id && t.function && t.function.name
   );
-  return { content, reasoning, toolCalls };
+  return { content, reasoning, toolCalls, usage, finishReason };
 }
 
 // ---------------------------------------------------------------------------
@@ -468,9 +663,10 @@ async function streamDeepSeek({ messages, apiKey, onDelta, toolChoice = "auto", 
 let _accessToken = { value: "", expiresAt: 0 };
 async function getAccessToken() {
   if (_accessToken.value && Date.now() < _accessToken.expiresAt) return _accessToken.value;
-  const resp = await fetch(
+  const resp = await fetchWithRetry(
     "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token",
-    { headers: { "Metadata-Flavor": "Google" } }
+    { headers: { "Metadata-Flavor": "Google" } },
+    { timeoutMs: FETCH_TIMEOUT.metadata, label: "metadata token" }
   );
   if (!resp.ok) throw new Error(`metadata token ${resp.status}`);
   const j = await resp.json();
@@ -481,13 +677,17 @@ async function getAccessToken() {
 async function embed(text, taskType) {
   const token = await getAccessToken();
   const url = `https://${VERTEX_LOCATION}-aiplatform.googleapis.com/v1/projects/${PROJECT_ID}/locations/${VERTEX_LOCATION}/publishers/google/models/${EMBED_MODEL}:predict`;
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      instances: [{ task_type: taskType, content: (text || "").slice(0, EMBED_INPUT_CHARS) }],
-    }),
-  });
+  const resp = await fetchWithRetry(
+    url,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        instances: [{ task_type: taskType, content: (text || "").slice(0, EMBED_INPUT_CHARS) }],
+      }),
+    },
+    { timeoutMs: FETCH_TIMEOUT.embed, label: "Vertex embed" }
+  );
   if (!resp.ok) {
     const t = await resp.text().catch(() => "");
     throw new Error(`Vertex embed ${resp.status}: ${t.slice(0, 200)}`);
@@ -503,13 +703,17 @@ async function embed(text, taskType) {
 async function embedBatch(texts, taskType) {
   const token = await getAccessToken();
   const url = `https://${VERTEX_LOCATION}-aiplatform.googleapis.com/v1/projects/${PROJECT_ID}/locations/${VERTEX_LOCATION}/publishers/google/models/${EMBED_MODEL}:predict`;
-  const resp = await fetch(url, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      instances: texts.map((t) => ({ task_type: taskType, content: (t || "").slice(0, EMBED_INPUT_CHARS) })),
-    }),
-  });
+  const resp = await fetchWithRetry(
+    url,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        instances: texts.map((t) => ({ task_type: taskType, content: (t || "").slice(0, EMBED_INPUT_CHARS) })),
+      }),
+    },
+    { timeoutMs: FETCH_TIMEOUT.embed, label: "Vertex embed batch" }
+  );
   if (!resp.ok) {
     const t = await resp.text().catch(() => "");
     throw new Error(`Vertex embed ${resp.status}: ${t.slice(0, 200)}`);
@@ -626,23 +830,27 @@ async function profileUpdate(currentProfile, userText, assistantText, apiKey) {
     "new durable facts, keep existing ones, and ignore one-off questions or transient " +
     "details. If there is nothing durable to add, return the current profile unchanged. " +
     "Output ONLY the profile, with no preamble.";
-  const resp = await fetch(`${DEEPSEEK_BASE}/chat/completions`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: PROFILE_MODEL,
-      temperature: 0.2,
-      max_tokens: 700,
-      stream: false,
-      messages: [
-        { role: "system", content: sys },
-        {
-          role: "user",
-          content: `CURRENT PROFILE:\n${currentProfile || "(empty)"}\n\nLATEST USER MESSAGE:\n${userText}\n\nASSISTANT REPLY (context):\n${(assistantText || "").slice(0, 1500)}`,
-        },
-      ],
-    }),
-  });
+  const resp = await fetchWithRetry(
+    `${DEEPSEEK_BASE}/chat/completions`,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: PROFILE_MODEL,
+        temperature: 0.2,
+        max_tokens: 700,
+        stream: false,
+        messages: [
+          { role: "system", content: sys },
+          {
+            role: "user",
+            content: `CURRENT PROFILE:\n${currentProfile || "(empty)"}\n\nLATEST USER MESSAGE:\n${userText}\n\nASSISTANT REPLY (context):\n${(assistantText || "").slice(0, 1500)}`,
+          },
+        ],
+      }),
+    },
+    { timeoutMs: FETCH_TIMEOUT.profile, label: "profile update" }
+  );
   if (!resp.ok) throw new Error(`profile ${resp.status}`);
   const j = await resp.json();
   return ((j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) || "").trim();
@@ -737,36 +945,58 @@ async function handleAction(req, res, uid) {
     return;
   }
 
-  // Idempotency: never perform the same confirmed action twice (e.g. a double-click
-  // or a re-rendered action card after switching conversations mid-run).
+  // Idempotency: a confirmed write must never run twice. RESERVE the actionId BEFORE
+  // issuing the (non-idempotent) Google write — create() fails if it already exists —
+  // so a re-confirm (double-click, retry after a slow/timeout response, re-rendered
+  // card) short-circuits instead of creating a duplicate event/draft.
   const actRef = actionId ? db.collection("users").doc(uid).collection("executedActions").doc(actionId) : null;
   if (actRef) {
-    const prev = await actRef.get();
-    if (prev.exists) {
-      res.json({ ok: true, kind, duplicate: true, result: prev.data().result || {} });
+    try {
+      await actRef.create({
+        kind,
+        status: "pending",
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        expireAt: admin.firestore.Timestamp.fromMillis(Date.now() + 7 * 86400000),
+      });
+    } catch {
+      // Already reserved/done → return the prior outcome rather than re-running.
+      const prev = await actRef.get();
+      res.json({ ok: true, kind, duplicate: true, result: (prev.exists && prev.data().result) || {} });
       return;
     }
   }
 
+  let result;
   try {
-    const result = kind === "calendar_create" ? await calendarCreate(googleToken, params) : await gmailDraft(googleToken, params);
-    if (actRef) {
-      await actRef.set({
-        kind,
-        result,
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
-        expireAt: admin.firestore.Timestamp.fromMillis(Date.now() + 7 * 86400000),
-      });
-    }
-    res.json({ ok: true, kind, result });
+    result = kind === "calendar_create" ? await calendarCreate(googleToken, params) : await gmailDraft(googleToken, params);
   } catch (e) {
+    // Classify ONLY the Google call's own failure (this try wraps nothing else, so a
+    // later Firestore bookkeeping error can't masquerade as a Google response and
+    // wrongly release the reservation). Did Google RESPOND with an error (4xx/5xx)?
+    // Then the write provably didn't happen → release the reservation so the user can
+    // retry. A timeout/network error is AMBIGUOUS (the write may have gone through) →
+    // keep the reservation and tell the user to check rather than blindly retry.
     logger.warn("action failed", { kind, uid, error: e.message });
+    const googleResponded = /\b[45]\d\d\b/.test(e.message || "");
+    if (actRef && googleResponded) await actRef.delete().catch(() => {});
     if (/\b40[13]\b/.test(e.message || "")) {
       res.status(401).json({ error: "Google connection expired. Reconnect Google (Memory → Connections) and try again.", reconnect: true });
-    } else {
+    } else if (googleResponded) {
       res.status(502).json({ error: "Action failed. Please try again." });
+    } else {
+      res.status(504).json({ error: "Timed out reaching Google — it may or may not have gone through. Please check your Google Calendar/Gmail before retrying." });
     }
+    return;
   }
+
+  // Google write SUCCEEDED. Record completion best-effort — a failure HERE must never
+  // delete the reservation (that would let a retry duplicate the calendar event/draft).
+  if (actRef) {
+    await actRef
+      .set({ status: "done", result, completedAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true })
+      .catch((e) => logger.warn("action record failed", { kind, uid, error: e.message }));
+  }
+  res.json({ ok: true, kind, result });
 }
 
 // ---------------------------------------------------------------------------
@@ -778,6 +1008,9 @@ exports.api = onRequest(
     secrets: [DEEPSEEK_API_KEY, TAVILY_API_KEY],
     timeoutSeconds: 300,
     memory: "512MiB",
+    // Hard ceiling on concurrent instances → bounds worst-case concurrent paid
+    // provider fan-out (DeepSeek/Tavily/Vertex) and runaway autoscaling spend.
+    maxInstances: 10,
     cors: true,
   },
   async (req, res) => {
@@ -806,6 +1039,18 @@ exports.api = onRequest(
       return;
     }
 
+    // --- Per-user rate limit (cheap abuse/cost ceiling; maxInstances is the global cap) ---
+    const gate = rateAcquire(uid);
+    if (!gate.ok) {
+      res.status(429).json({
+        error:
+          gate.reason === "concurrent"
+            ? "Too many requests in flight. Let the current ones finish, then try again."
+            : "You're sending requests very quickly — please slow down a moment.",
+      });
+      return;
+    }
+
     // --- Route: document ingestion / confirmed action / chat ---
     if (req.path && req.path.includes("/ingest")) {
       try {
@@ -814,6 +1059,7 @@ exports.api = onRequest(
         logger.error("ingest error", { error: err.message, uid });
         if (!res.headersSent) res.status(500).json({ error: err.message || "Ingest failed" });
       }
+      gate.release();
       return;
     }
     if (req.path && req.path.includes("/action")) {
@@ -823,6 +1069,7 @@ exports.api = onRequest(
         logger.error("action error", { error: err.message, uid });
         if (!res.headersSent) res.status(500).json({ error: err.message || "Action failed" });
       }
+      gate.release();
       return;
     }
 
@@ -837,6 +1084,7 @@ exports.api = onRequest(
       !message.trim()
     ) {
       res.status(400).json({ error: "conversationId and message are required" });
+      gate.release();
       return;
     }
     const userText = message.trim().slice(0, MAX_INPUT_CHARS);
@@ -854,9 +1102,20 @@ exports.api = onRequest(
     res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
     res.setHeader("Cache-Control", "no-cache, no-transform");
     res.setHeader("X-Accel-Buffering", "no");
+    const reqId = crypto.randomBytes(6).toString("hex");
+    const startedAt = Date.now();
     const send = (obj) => {
       res.write(JSON.stringify(obj) + "\n");
     };
+    // Per-request abort: if the client disconnects (navigates away, or hits Stop
+    // — which aborts the fetch), tear down upstream work instead of streaming a
+    // full answer nobody will see. This is the dominant abandoned-turn cost leak.
+    const ac = new AbortController();
+    const signal = ac.signal;
+    let finished = false;
+    res.on("close", () => {
+      if (!finished) ac.abort();
+    });
     // Heartbeat: keep bytes flowing during idle gaps (web searches, model
     // round-trips) so mobile carriers/proxies don't drop the streaming
     // connection mid-answer ("Load failed"). The client ignores type:"ping".
@@ -868,8 +1127,15 @@ exports.api = onRequest(
       }
     }, 5000);
     const finish = () => {
+      if (finished) return;
+      finished = true;
       clearInterval(heartbeat);
-      res.end();
+      gate.release();
+      try {
+        res.end();
+      } catch {
+        /* already closed */
+      }
     };
 
     try {
@@ -960,27 +1226,53 @@ exports.api = onRequest(
       const learned = []; // {title, url, content} from web tools → persisted to memory
       let usedPrivateConnector = false; // gmail/calendar/drive read → don't persist this turn
 
-      let assembled = "";
-      let finalReasoning = "";
+      // streamedContent/Reasoning accumulate every delta as it's sent to the client,
+      // so they capture the in-flight partial even if a stream is aborted mid-round
+      // (the aborted streamDeepSeek call returns nothing). They ARE the answer of record.
+      let streamedContent = "";
+      let streamedReasoning = "";
+      let lastFinishReason = "";
+      let promptTokens = 0;
+      let completionTokens = 0;
+      let roundsUsed = 0;
 
       for (let round = 0; round <= MAX_TOOL_ROUNDS; round++) {
+        if (signal.aborted) break; // client stopped/disconnected between rounds
+        roundsUsed = round + 1;
         const isLastRound = round === MAX_TOOL_ROUNDS;
-        const { content, reasoning, toolCalls } = await streamDeepSeek({
-          messages,
-          apiKey: deepseekKey,
-          tools: activeTools,
-          // Final round forbids tools, so the model must produce an answer
-          // instead of ending the turn on an unanswerable tool_calls.
-          toolChoice: isLastRound ? "none" : "auto",
-          onDelta: ({ reasoning: r, content: c }) => {
-            if (r) send({ type: "reasoning", delta: r });
-            if (c) send({ type: "content", delta: c });
-          },
-        });
-        finalReasoning += reasoning;
-        // Accumulate exactly what the client renders (it appends every delta),
-        // so the persisted answer matches what the user saw stream in.
-        if (content) assembled += content;
+        let roundOut;
+        try {
+          roundOut = await streamDeepSeek({
+            messages,
+            apiKey: deepseekKey,
+            tools: activeTools,
+            signal,
+            // Final round forbids tools, so the model must produce an answer
+            // instead of ending the turn on an unanswerable tool_calls.
+            toolChoice: isLastRound ? "none" : "auto",
+            onDelta: ({ reasoning: r, content: c }) => {
+              if (r) {
+                streamedReasoning += r;
+                send({ type: "reasoning", delta: r });
+              }
+              if (c) {
+                streamedContent += c;
+                send({ type: "content", delta: c });
+              }
+            },
+          });
+        } catch (e) {
+          // Abort (client Stop / disconnect) → fall through to the post-loop
+          // best-effort persist (keeps the partial); real errors → outer catch.
+          if (signal.aborted || e.name === "AbortError") break;
+          throw e;
+        }
+        const { content, toolCalls, usage, finishReason } = roundOut;
+        if (usage) {
+          promptTokens += usage.prompt_tokens || 0;
+          completionTokens += usage.completion_tokens || 0;
+        }
+        if (finishReason) lastFinishReason = finishReason;
 
         const wantsTools = toolCalls.length > 0 && !isLastRound;
         if (!wantsTools) break;
@@ -1043,8 +1335,9 @@ exports.api = onRequest(
             const label = urls.join(", ");
             send({ type: "tool", status: "start", name: "web_extract", query: label });
             try {
-              results = await tavilyExtract(urls, tavilyKey);
+              results = await tavilyExtract(urls, tavilyKey, signal);
             } catch (e) {
+              if (signal.aborted) throw e; // client stopped — propagate, don't swallow
               logger.warn("Tavily extract failed", { urls, error: e.message });
               results = [];
             }
@@ -1057,8 +1350,9 @@ exports.api = onRequest(
             const query = String(args.query).trim();
             send({ type: "tool", status: "start", name: "web_search", query });
             try {
-              results = await tavilySearch(query, tavilyKey);
+              results = await tavilySearch(query, tavilyKey, signal);
             } catch (e) {
+              if (signal.aborted) throw e; // client stopped — propagate, don't swallow
               logger.warn("Tavily search failed", { query, error: e.message });
               results = [];
             }
@@ -1105,7 +1399,49 @@ exports.api = onRequest(
         }
       }
 
-      const finalContent = assembled;
+      // Client stopped / disconnected. Best-effort persist whatever was generated so
+      // a flaky-network blip never loses the turn (and an intentional Stop keeps its
+      // partial) — but SKIP the expensive post-processing (memory embeds + profile
+      // distillation). That skipped work is the cost Stop is meant to save.
+      if (signal.aborted) {
+        if (streamedContent.trim()) {
+          try {
+            const ts = admin.firestore.Timestamp.now();
+            const batch = db.batch();
+            batch.set(msgsRef.doc(), { role: "user", content: userText, createdAt: ts });
+            batch.set(msgsRef.doc(), {
+              role: "assistant",
+              content: streamedContent,
+              reasoning: streamedReasoning || "",
+              sources,
+              memoryUsed,
+              model: DEEPSEEK_MODEL,
+              stopped: true,
+              createdAt: admin.firestore.Timestamp.fromMillis(ts.toMillis() + 1),
+            });
+            const convUpdate = { updatedAt: admin.firestore.FieldValue.serverTimestamp() };
+            if (!convExists) convUpdate.createdAt = admin.firestore.FieldValue.serverTimestamp();
+            if (titleToSet) convUpdate.title = titleToSet;
+            batch.set(convRef, convUpdate, { merge: true });
+            await batch.commit();
+            logger.info("chat_stopped_persisted", { reqId, uid, chars: streamedContent.length, rounds: roundsUsed });
+          } catch (e) {
+            logger.warn("stopped persist failed", { reqId, uid, error: e.message });
+          }
+        }
+        finish();
+        return;
+      }
+
+      // Generation hit the output-token ceiling — flag it (and save the marker) so the
+      // user knows it was cut and can ask to continue, instead of a silent truncation.
+      if (lastFinishReason === "length") {
+        const note = "\n\n_(Reached the response length limit — ask me to continue.)_";
+        streamedContent += note;
+        send({ type: "content", delta: note });
+      }
+
+      const finalContent = streamedContent;
       if (!finalContent.trim()) {
         // No answer text produced — surface an error instead of saving a blank
         // turn (keeps history clean, avoids an empty assistant bubble).
@@ -1117,50 +1453,21 @@ exports.api = onRequest(
         return;
       }
 
-      // Embed this turn for future recall + refresh the durable profile, in
-      // parallel. Per-doc resilient: one failed embed never drops the others,
-      // and a profile-update failure leaves the existing profile untouched.
-      learned.sort((a, b) => (b.source === "extract" ? 1 : 0) - (a.source === "extract" ? 1 : 0));
-      const builders = [];
-      // Turns that read private Google data are NOT persisted to long-term memory
-      // or distilled into the profile (the answer can quote private email/files).
-      if (!usedPrivateConnector) {
-        builders.push(buildMemoryDoc(uid, conversationId, "user", userText));
-        builders.push(buildMemoryDoc(uid, conversationId, "assistant", finalContent));
-      }
-      for (const l of learned.slice(0, MAX_WEB_MEMORIES)) {
-        const text = `${l.title}\n${l.content}`.slice(0, 4000);
-        builders.push(buildMemoryDoc(uid, conversationId, "web", text, l.url));
-      }
-      const [profileVal, memorySettled] = await Promise.all([
-        usedPrivateConnector
-          ? Promise.resolve(null)
-          : profileUpdate(profileText, userText, finalContent, deepseekKey).catch((e) => {
-              logger.warn("profile update failed", { error: e.message });
-              return null;
-            }),
-        Promise.allSettled(builders),
-      ]);
-      const memoryDocs = memorySettled
-        .filter((s) => s.status === "fulfilled")
-        .map((s) => s.value);
-      const memFailed = memorySettled.filter((s) => s.status === "rejected").length;
-      if (memFailed) logger.warn("memory embed partial failure", { failed: memFailed, total: builders.length });
-      const dedupedDocs = await dedupeMemories(uid, memoryDocs);
-      const newProfile =
-        profileVal && profileVal.trim() ? profileVal.trim().slice(0, PROFILE_MAX_CHARS) : profileText;
-
-      // Persist the user + assistant turn together, and only on success, so a
-      // failed request can never orphan a user message and corrupt history.
-      const batch = db.batch();
+      // (1) Persist the TURN FIRST — user + assistant + conv — so the completed,
+      // already-displayed answer is durable BEFORE the slow, timeout-prone
+      // post-processing below. A function-timeout/instance-recycle during memory
+      // or profile work then loses only that best-effort follow-up, never the
+      // answer the user already saw. (Committed together so a failure can't orphan
+      // a user message and corrupt history.)
       const ts = admin.firestore.Timestamp.now();
+      const turnBatch = db.batch();
       const userMsgRef = msgsRef.doc();
-      batch.set(userMsgRef, { role: "user", content: userText, createdAt: ts });
+      turnBatch.set(userMsgRef, { role: "user", content: userText, createdAt: ts });
       const assistantRef = msgsRef.doc();
-      batch.set(assistantRef, {
+      turnBatch.set(assistantRef, {
         role: "assistant",
         content: finalContent,
-        reasoning: finalReasoning || "",
+        reasoning: streamedReasoning || "",
         sources,
         memoryUsed,
         model: DEEPSEEK_MODEL,
@@ -1170,23 +1477,79 @@ exports.api = onRequest(
       const convUpdate = { updatedAt: admin.firestore.FieldValue.serverTimestamp() };
       if (!convExists) convUpdate.createdAt = admin.firestore.FieldValue.serverTimestamp();
       if (titleToSet) convUpdate.title = titleToSet;
-      batch.set(convRef, convUpdate, { merge: true });
-      for (const md of dedupedDocs) batch.set(md.ref, md.data);
-      if (newProfile && newProfile !== profileText) {
-        batch.set(
-          db.collection("users").doc(uid),
-          { profile: newProfile, profileUpdatedAt: admin.firestore.FieldValue.serverTimestamp() },
-          { merge: true }
-        );
-      }
-      await batch.commit();
+      turnBatch.set(convRef, convUpdate, { merge: true });
+      await turnBatch.commit();
 
       send({ type: "done", messageId: assistantRef.id, sources, memoryUsed });
+      // Per-turn cost/observability — invisible until the bill arrives otherwise.
+      logger.info("chat_complete", {
+        reqId,
+        uid,
+        rounds: roundsUsed,
+        promptTokens,
+        completionTokens,
+        totalTokens: promptTokens + completionTokens,
+        sources: sources.length,
+        memoryUsed,
+        ms: Date.now() - startedAt,
+      });
+
+      // (2) Best-effort follow-up: long-term memory + durable profile. Runs within
+      // the request (before finish) so it still gets CPU, but in its own commit — a
+      // failure here can never affect the turn already saved above.
+      try {
+        learned.sort((a, b) => (b.source === "extract" ? 1 : 0) - (a.source === "extract" ? 1 : 0));
+        const builders = [];
+        // Turns that read private Google data are NOT persisted to long-term memory
+        // or distilled into the profile (the answer can quote private email/files).
+        if (!usedPrivateConnector) {
+          builders.push(buildMemoryDoc(uid, conversationId, "user", userText));
+          builders.push(buildMemoryDoc(uid, conversationId, "assistant", finalContent));
+        }
+        for (const l of learned.slice(0, MAX_WEB_MEMORIES)) {
+          const text = `${l.title}\n${l.content}`.slice(0, 4000);
+          builders.push(buildMemoryDoc(uid, conversationId, "web", text, l.url));
+        }
+        const [profileVal, memorySettled] = await Promise.all([
+          usedPrivateConnector
+            ? Promise.resolve(null)
+            : profileUpdate(profileText, userText, finalContent, deepseekKey).catch((e) => {
+                logger.warn("profile update failed", { error: e.message });
+                return null;
+              }),
+          Promise.allSettled(builders),
+        ]);
+        const memoryDocs = memorySettled.filter((s) => s.status === "fulfilled").map((s) => s.value);
+        const memFailed = memorySettled.filter((s) => s.status === "rejected").length;
+        if (memFailed) logger.warn("memory embed partial failure", { failed: memFailed, total: builders.length });
+        const dedupedDocs = await dedupeMemories(uid, memoryDocs);
+        const newProfile =
+          profileVal && profileVal.trim() ? profileVal.trim().slice(0, PROFILE_MAX_CHARS) : profileText;
+        if (dedupedDocs.length || (newProfile && newProfile !== profileText)) {
+          const followBatch = db.batch();
+          for (const md of dedupedDocs) followBatch.set(md.ref, md.data);
+          if (newProfile && newProfile !== profileText) {
+            followBatch.set(
+              db.collection("users").doc(uid),
+              { profile: newProfile, profileUpdatedAt: admin.firestore.FieldValue.serverTimestamp() },
+              { merge: true }
+            );
+          }
+          await followBatch.commit();
+        }
+      } catch (e) {
+        logger.warn("post-processing failed", { reqId, uid, error: e.message });
+      }
       finish();
     } catch (err) {
-      logger.error("chat handler error", { error: err.message, uid });
+      // Client aborted (Stop / disconnect) — expected, not an error; nothing to persist.
+      if (signal.aborted || err.name === "AbortError") {
+        finish();
+        return;
+      }
+      logger.error("chat handler error", { reqId, uid, error: err.message });
       try {
-        send({ type: "error", message: err.message || "Internal error" });
+        send({ type: "error", message: friendlyError(reqId) });
       } catch {
         /* response already closed */
       }
