@@ -186,7 +186,11 @@ function truncate(s, n) {
 function scrollToBottom(force) {
   const m = els.messages;
   const near = m.scrollHeight - m.scrollTop - m.clientHeight < 160;
-  if (force || near) m.scrollTop = m.scrollHeight;
+  if (force || near) {
+    m.scrollTop = m.scrollHeight;
+    const jb = document.getElementById("jump-latest");
+    if (jb) jb.hidden = true;
+  }
 }
 // Announce streaming status to screen readers via the polite live region.
 function announce(text) {
@@ -359,6 +363,8 @@ function updateComposer() {
   els.input.placeholder = busy ? "Erosolar is responding…" : "Message Erosolar…";
   setSendMode(busy);
   els.send.disabled = busy ? false : !els.input.value.trim();
+  const exp = document.getElementById("export-chat");
+  if (exp) exp.hidden = state.messages.length === 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -418,6 +424,7 @@ async function selectConversation(id, title) {
     els.empty.hidden = false;
   }
   scrollToBottom(true);
+  updateComposer(); // sync the export button with the loaded messages
 }
 
 function highlightActive() {
@@ -798,6 +805,49 @@ function addAssistantCopy(msg) {
 
 // Finalize the assistant turn: collapse the reasoning log (still above the
 // answer), ensure the full answer + sources are rendered, add the copy button.
+// Recoverable failed turn: re-stream the same prompt. The failed turn was never
+// persisted server-side, so this is a clean re-run, not a duplicate.
+function retryTurn(failedMsg) {
+  const text = failedMsg._retryText;
+  const convId = failedMsg.convId;
+  if (!text || !convId || activeBusy()) return;
+  if (failedMsg._el) failedMsg._el.remove();
+  const i = state.messages.indexOf(failedMsg);
+  if (i >= 0) state.messages.splice(i, 1);
+  const aMsg = {
+    role: "assistant", content: "", reasoning: "", sources: [],
+    streaming: true, convId, activityLabel: "Reasoning",
+  };
+  const run = { convId, userMsg: { role: "user", content: text }, aMsg, controller: new AbortController() };
+  state.runs.set(convId, run);
+  if (state.activeId === convId) {
+    addMessageView(aMsg);
+    scrollToBottom(true);
+  }
+  updateComposer();
+  refreshConvLiveDot(convId);
+  streamRun(run, text);
+}
+
+// Render a recoverable error block (with Retry) under a failed assistant turn.
+function renderError(msg) {
+  if (!msg.error || !msg._body) return;
+  const box = document.createElement("div");
+  box.className = "turn-error";
+  const label = document.createElement("span");
+  label.textContent = "⚠️ " + msg.error;
+  box.appendChild(label);
+  if (msg._retryText) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "retry-btn";
+    btn.textContent = "Retry";
+    btn.addEventListener("click", () => retryTurn(msg));
+    box.appendChild(btn);
+  }
+  msg._body.appendChild(box);
+}
+
 function finalizeAssistant(msg) {
   if (msg._reasonDetails) {
     msg._reasonDetails.open = false;
@@ -809,7 +859,8 @@ function finalizeAssistant(msg) {
   renderMemoryNote(msg);
   paintAssistant(msg);
   renderSources(msg);
-  addAssistantCopy(msg);
+  if (msg.content && msg.content.trim()) addAssistantCopy(msg); // no copy on a pure-error turn
+  renderError(msg);
 }
 
 // ---------------------------------------------------------------------------
@@ -855,6 +906,9 @@ async function sendMessage(text) {
 
   // Render optimistically if this conversation is on screen.
   if (state.activeId === convId) {
+    // A new turn supersedes any earlier failed turn — drop stale Retry controls so
+    // an out-of-order retry can't reorder the conversation.
+    els.messages.querySelectorAll(".retry-btn").forEach((b) => b.remove());
     addMessageView(userMsg);
     addMessageView(aMsg);
     scrollToBottom(true);
@@ -914,7 +968,12 @@ async function streamRun(run, text) {
       aMsg.stopped = true;
       if (!aMsg.content.trim()) aMsg.content = "_Stopped._";
     } else {
-      aMsg.content += (aMsg.content ? "\n\n" : "") + "⚠️ " + (err.message || "Something went wrong.");
+      // Recoverable error. Only offer Retry when NOTHING streamed: once answer
+      // content has begun, a mid-stream disconnect means the server best-effort-
+      // persisted a partial turn, so re-running would DUPLICATE it. (Server
+      // type:error events stay retryable — they never persist; see handleEvent.)
+      aMsg.error = err.message || "Something went wrong.";
+      if (!aMsg.content.trim()) aMsg._retryText = text;
     }
   } finally {
     aMsg.streaming = false;
@@ -1004,11 +1063,9 @@ function handleEvent(run, ev) {
       if (visible) announce("Answer ready");
       break;
     case "error":
-      msg.content += (msg.content ? "\n\n" : "") + "⚠️ " + (ev.message || "Error");
-      if (visible) {
-        announce("Something went wrong");
-        scheduleContentRender(msg);
-      }
+      msg.error = ev.message || "Error";
+      msg._retryText = run.userMsg.content; // preserve the prompt for one-click Retry
+      if (visible) announce("Something went wrong");
       break;
   }
 }
@@ -1430,3 +1487,47 @@ if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("./sw.js").catch(() => {});
   });
 }
+
+// ---------------------------------------------------------------------------
+// Export the current conversation as a Markdown file (with sources).
+// ---------------------------------------------------------------------------
+function exportConversation() {
+  if (!state.messages.length) return;
+  const lines = ["# " + (els.title.textContent || "Erosolar chat"), ""];
+  for (const m of state.messages) {
+    if (m.role === "user") {
+      lines.push("## You", "", m.content || "", "");
+    } else if (m.content && m.content.trim()) {
+      lines.push("## Erosolar", "", m.content, "");
+      if (m.sources && m.sources.length) {
+        lines.push("**Sources**");
+        m.sources.forEach((s, i) => lines.push(`${i + 1}. [${s.title || s.url}](${s.url})`));
+        lines.push("");
+      }
+    }
+  }
+  const blob = new Blob([lines.join("\n")], { type: "text/markdown;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download =
+    ((els.title.textContent || "erosolar-chat").replace(/[^\w-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48) || "chat") + ".md";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+document.getElementById("export-chat")?.addEventListener("click", exportConversation);
+
+// ---------------------------------------------------------------------------
+// Jump-to-latest pill — appears while scrolled up; returns to the live tail.
+// ---------------------------------------------------------------------------
+(() => {
+  const jb = document.getElementById("jump-latest");
+  if (!jb) return;
+  els.messages.addEventListener("scroll", () => {
+    const m = els.messages;
+    jb.hidden = m.scrollHeight - m.scrollTop - m.clientHeight <= 240;
+  });
+  jb.addEventListener("click", () => scrollToBottom(true));
+})();
