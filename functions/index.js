@@ -1114,18 +1114,24 @@ exports.api = onRequest(
     // --- Validate input ---
     const body = req.body || {};
     const conversationId = body.conversationId;
-    const message = body.message;
-    if (
-      typeof conversationId !== "string" ||
-      !conversationId ||
-      typeof message !== "string" ||
-      !message.trim()
-    ) {
-      res.status(400).json({ error: "conversationId and message are required" });
+    const message = typeof body.message === "string" ? body.message : null;
+    const isRegenerate = body.regenerate === true;
+    const fromMessageId =
+      typeof body.fromMessageId === "string" && body.fromMessageId ? body.fromMessageId : null;
+    const isRewind = isRegenerate || fromMessageId != null; // regenerate or edit-and-resend
+    if (typeof conversationId !== "string" || !conversationId) {
+      res.status(400).json({ error: "conversationId is required" });
       gate.release();
       return;
     }
-    const userText = message.trim().slice(0, MAX_INPUT_CHARS);
+    // A regenerate re-runs the existing last user message (no new text); every other
+    // request (a new turn, or an edit-and-resend) requires message text.
+    if (!isRegenerate && (!message || !message.trim())) {
+      res.status(400).json({ error: "message is required" });
+      gate.release();
+      return;
+    }
+    let userText = message && message.trim() ? message.trim().slice(0, MAX_INPUT_CHARS) : "";
 
     // Path is always scoped to the authenticated uid — a client cannot reach
     // another user's data even by passing a foreign conversationId.
@@ -1177,15 +1183,55 @@ exports.api = onRequest(
     };
 
     try {
-      // Load the FULL conversation history (oldest → newest) so Erosolar always
-      // considers everything said in this chat.
+      // Load the FULL conversation history (oldest → newest). Keep doc id/ref so a
+      // rewind can delete the tail and edit the anchor message.
       const histSnap = await msgsRef.orderBy("createdAt", "asc").get();
-      const allHistory = histSnap.docs
-        .map((d) => d.data())
-        .map((d) => ({
-          role: d.role === "assistant" ? "assistant" : "user",
-          content: typeof d.content === "string" ? d.content : "",
-        }))
+      let msgDocs = histSnap.docs.map((d) => {
+        const data = d.data();
+        return {
+          id: d.id,
+          ref: d.ref,
+          role: data.role === "assistant" ? "assistant" : "user",
+          content: typeof data.content === "string" ? data.content : "",
+        };
+      });
+
+      // --- Rewind: regenerate / edit-and-resend ---
+      // Re-run from an earlier USER message. The actual tail-delete + anchor-edit are
+      // DEFERRED into the persist batch (below) so they apply ATOMICALLY with the new
+      // answer — a failed or aborted-before-content regeneration leaves the prior
+      // answer (and, for an edit, the original question + later turns) fully intact.
+      let rewindTailRefs = []; // old tail to delete, committed with the replacement answer
+      let rewindEditRef = null; // anchor whose content to overwrite (edit-and-resend)
+      if (isRewind) {
+        let anchorIndex = -1;
+        if (fromMessageId) {
+          anchorIndex = msgDocs.findIndex((m) => m.id === fromMessageId && m.role === "user");
+        } else {
+          for (let i = msgDocs.length - 1; i >= 0; i--) {
+            if (msgDocs[i].role === "user") { anchorIndex = i; break; }
+          }
+        }
+        if (anchorIndex < 0) {
+          send({ type: "error", message: "There's nothing to regenerate." });
+          finish();
+          return;
+        }
+        const anchor = msgDocs[anchorIndex];
+        userText = userText || anchor.content; // edit text overrides; else re-run as-is
+        if (!userText.trim()) {
+          send({ type: "error", message: "Nothing to send." });
+          finish();
+          return;
+        }
+        const edited = !!(message && message.trim()) && userText !== anchor.content;
+        rewindTailRefs = msgDocs.slice(anchorIndex + 1).map((m) => m.ref);
+        if (edited) rewindEditRef = anchor.ref;
+        msgDocs = msgDocs.slice(0, anchorIndex); // history = everything BEFORE the anchor
+      }
+
+      const allHistory = msgDocs
+        .map((m) => ({ role: m.role, content: m.content }))
         .filter((m) => m.content);
       // Keep within the context budget, preferring the most recent turns; for
       // normal-length conversations this includes every message.
@@ -1205,7 +1251,7 @@ exports.api = onRequest(
       const convExists = convSnap.exists;
       const existingTitle = convExists ? convSnap.data().title : null;
       let titleToSet = null;
-      if (!existingTitle || existingTitle === "New chat") {
+      if (!isRewind && (!existingTitle || existingTitle === "New chat")) {
         const oneLine = userText.replace(/\s+/g, " ").trim();
         if (oneLine.length <= 60) {
           titleToSet = oneLine;
@@ -1475,7 +1521,8 @@ exports.api = onRequest(
           try {
             const ts = admin.firestore.Timestamp.now();
             const batch = db.batch();
-            batch.set(msgsRef.doc(), { role: "user", content: userText, createdAt: ts });
+            // On a rewind the anchor user message already exists — only write the assistant.
+            if (!isRewind) batch.set(msgsRef.doc(), { role: "user", content: userText, createdAt: ts });
             batch.set(msgsRef.doc(), {
               role: "assistant",
               content: streamedContent,
@@ -1484,12 +1531,14 @@ exports.api = onRequest(
               memoryUsed,
               model: DEEPSEEK_MODEL,
               stopped: true,
-              createdAt: admin.firestore.Timestamp.fromMillis(ts.toMillis() + 1),
+              createdAt: isRewind ? ts : admin.firestore.Timestamp.fromMillis(ts.toMillis() + 1),
             });
             const convUpdate = { updatedAt: admin.firestore.FieldValue.serverTimestamp() };
             if (!convExists) convUpdate.createdAt = admin.firestore.FieldValue.serverTimestamp();
             if (titleToSet) convUpdate.title = titleToSet;
             batch.set(convRef, convUpdate, { merge: true });
+            for (const ref of rewindTailRefs) batch.delete(ref);
+            if (rewindEditRef) batch.update(rewindEditRef, { content: userText });
             await batch.commit();
             logger.info("chat_stopped_persisted", { reqId, uid, chars: streamedContent.length, rounds: roundsUsed });
           } catch (e) {
@@ -1528,8 +1577,11 @@ exports.api = onRequest(
       // a user message and corrupt history.)
       const ts = admin.firestore.Timestamp.now();
       const turnBatch = db.batch();
-      const userMsgRef = msgsRef.doc();
-      turnBatch.set(userMsgRef, { role: "user", content: userText, createdAt: ts });
+      // On a rewind (regenerate/edit) the anchor user message already exists; only the
+      // new assistant message is written. `ts` (now) sorts after the older anchor.
+      if (!isRewind) {
+        turnBatch.set(msgsRef.doc(), { role: "user", content: userText, createdAt: ts });
+      }
       const assistantRef = msgsRef.doc();
       turnBatch.set(assistantRef, {
         role: "assistant",
@@ -1538,13 +1590,17 @@ exports.api = onRequest(
         sources,
         memoryUsed,
         model: DEEPSEEK_MODEL,
-        // +1ms guarantees user-before-assistant ordering under orderBy(createdAt).
-        createdAt: admin.firestore.Timestamp.fromMillis(ts.toMillis() + 1),
+        // +1ms keeps user-before-assistant for a new turn; a rewind's anchor predates `ts`.
+        createdAt: isRewind ? ts : admin.firestore.Timestamp.fromMillis(ts.toMillis() + 1),
       });
       const convUpdate = { updatedAt: admin.firestore.FieldValue.serverTimestamp() };
       if (!convExists) convUpdate.createdAt = admin.firestore.FieldValue.serverTimestamp();
       if (titleToSet) convUpdate.title = titleToSet;
       turnBatch.set(convRef, convUpdate, { merge: true });
+      // Rewind: delete the old tail + apply the edit ATOMICALLY with the new answer,
+      // so a failed/aborted regeneration can never destroy the prior answer.
+      for (const ref of rewindTailRefs) turnBatch.delete(ref);
+      if (rewindEditRef) turnBatch.update(rewindEditRef, { content: userText });
       await turnBatch.commit();
 
       send({ type: "done", messageId: assistantRef.id, sources, memoryUsed });
@@ -1562,6 +1618,13 @@ exports.api = onRequest(
         memoryUsed,
         ms: Date.now() - startedAt,
       });
+
+      // Rewinds (regenerate/edit) skip the long-term memory + profile follow-up: the
+      // original turn was already distilled, and re-rolls shouldn't accumulate dupes.
+      if (isRewind) {
+        finish();
+        return;
+      }
 
       // (2) Best-effort follow-up: long-term memory + durable profile. Runs within
       // the request (before finish) so it still gets CPU, but in its own commit — a

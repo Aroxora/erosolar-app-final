@@ -592,7 +592,7 @@ async function selectConversation(id, title) {
   // until it completes, so it won't be in the loaded history).
   if (state.activeId === id && state.runs.has(id)) {
     const run = state.runs.get(id);
-    addMessageView(run.userMsg);
+    if (run.userMsg.content) addMessageView(run.userMsg); // rewind runs have no user bubble
     addMessageView(run.aMsg);
   }
 
@@ -1130,6 +1130,54 @@ function linkCitations(root, sources) {
   }
 }
 
+// Re-roll the latest answer: drop the old assistant turn (and anything after) and
+// re-stream via {regenerate:true} (the server re-runs the last user message). Stale
+// regenerate buttons are stripped when any new turn starts, so only the latest has one.
+function regenerateTurn(assistantMsg) {
+  if (activeBusy()) return;
+  const convId = assistantMsg.convId || state.activeId;
+  if (!convId) return;
+  const idx = state.messages.indexOf(assistantMsg);
+  if (idx >= 0) state.messages.splice(idx).forEach((m) => m._el && m._el.remove());
+  const aMsg = {
+    role: "assistant", content: "", reasoning: "", sources: [],
+    streaming: true, convId, activityLabel: "Reasoning",
+  };
+  const run = {
+    convId, userMsg: { role: "user", content: "" }, aMsg,
+    controller: new AbortController(), rewind: { regenerate: true },
+  };
+  state.runs.set(convId, run);
+  if (state.activeId === convId) {
+    addMessageView(aMsg);
+    scrollToBottom(true);
+  }
+  updateComposer();
+  refreshConvLiveDot(convId);
+  streamRun(run, "");
+}
+
+function addRegenButton(msg) {
+  if (!msg._body) return;
+  // Only the LATEST answer is regeneratable (regenerate:true re-runs the last turn),
+  // so strip any older buttons first — covers a bulk history load (oldest→newest).
+  els.messages.querySelectorAll(".regen-btn").forEach((b) => b.remove());
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "regen-btn";
+  btn.innerHTML =
+    '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg><span>Regenerate</span>';
+  btn.addEventListener("click", () => regenerateTurn(msg));
+  const row = msg._body.querySelector(".msg-actions");
+  if (row) row.appendChild(btn);
+  else {
+    const r = document.createElement("div");
+    r.className = "msg-actions";
+    r.appendChild(btn);
+    msg._body.appendChild(r);
+  }
+}
+
 function finalizeAssistant(msg) {
   if (msg._reasonDetails) {
     msg._reasonDetails.open = false;
@@ -1144,6 +1192,7 @@ function finalizeAssistant(msg) {
   linkCitations(msg._contentEl, msg.sources);
   renderSources(msg);
   if (msg.content && msg.content.trim()) addAssistantCopy(msg); // no copy on a pure-error turn
+  if (msg.content && msg.content.trim() && !msg.error) addRegenButton(msg);
   renderError(msg);
 }
 
@@ -1192,7 +1241,7 @@ async function sendMessage(text) {
   if (state.activeId === convId) {
     // A new turn supersedes any earlier failed turn — drop stale Retry controls so
     // an out-of-order retry can't reorder the conversation.
-    els.messages.querySelectorAll(".retry-btn").forEach((b) => b.remove());
+    els.messages.querySelectorAll(".retry-btn, .regen-btn").forEach((b) => b.remove());
     addMessageView(userMsg);
     addMessageView(aMsg);
     scrollToBottom(true);
@@ -1212,7 +1261,8 @@ async function streamRun(run, text) {
       headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
       body: JSON.stringify({
         conversationId: convId,
-        message: text,
+        ...(text ? { message: text } : {}),
+        ...(run.rewind || {}), // {regenerate:true} for a re-roll
         ...(googleConnected() ? { googleToken: state.googleToken } : {}),
       }),
       signal: run.controller.signal,
