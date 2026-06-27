@@ -1206,7 +1206,17 @@ exports.api = onRequest(
       const existingTitle = convExists ? convSnap.data().title : null;
       let titleToSet = null;
       if (!existingTitle || existingTitle === "New chat") {
-        titleToSet = userText.replace(/\s+/g, " ").slice(0, 60);
+        const oneLine = userText.replace(/\s+/g, " ").trim();
+        if (oneLine.length <= 60) {
+          titleToSet = oneLine;
+        } else {
+          // Cut at a word boundary (no mid-word "…inverter keeps t"); fall back to a
+          // hard cut if that leaves too little (one very long word). Array.from avoids
+          // splitting an emoji surrogate pair at the boundary.
+          const hard = Array.from(oneLine).slice(0, 57).join("");
+          const wb = hard.replace(/\s+\S*$/, "").trim();
+          titleToSet = (wb.length >= 24 ? wb : hard.trim()) + "…";
+        }
         send({ type: "title", title: titleToSet });
       }
 

@@ -118,7 +118,12 @@ body {
 }
 .convo:hover { background: var(--panel); color: var(--text); }
 .convo.active { background: var(--panel-2); color: var(--text); border-color: var(--border); }
-.convo-title { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.convo-title {
+  flex: 1; min-width: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  background: none; border: 0; padding: 0; margin: 0;
+  font: inherit; color: inherit; text-align: left; cursor: pointer;
+}
 .convo-live { width: 7px; height: 7px; flex: none; border-radius: 50%; background: var(--accent); box-shadow: 0 0 8px var(--accent); animation: pulse 1.1s ease-in-out infinite; }
 @keyframes pulse { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
 .convo-del {
@@ -383,6 +388,35 @@ body {
 .splash img { width: 72px; height: 72px; border-radius: 18px; animation: splashpulse 1.4s ease-in-out infinite; }
 @keyframes splashpulse { 0%, 100% { opacity: 0.55; transform: scale(0.97); } 50% { opacity: 1; transform: scale(1); } }
 @media (prefers-reduced-motion: reduce) { .splash img { animation: none; } }
+
+/* ===================== Accessibility ===================== */
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+.skip-link {
+  position: fixed; top: -120%; left: 12px; z-index: 100;
+  background: var(--accent); color: #0b0b18; font-weight: 600; font-size: 14px;
+  padding: 10px 16px; border-radius: 10px; text-decoration: none;
+}
+.skip-link:focus { top: 12px; }
+/* The skip link targets #input, which lives in the (hidden) app shell — hide it
+   until the chat UI exists so it can't focus a hidden element on the login screen. */
+body:has(#app[hidden]) .skip-link { display: none; }
+/* Visible keyboard focus everywhere (additive; no radius so it follows each shape). */
+:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 2px; }
+/* The conversation delete button is opacity:0 until hover — reveal it on keyboard focus too. */
+.convo:focus-within .convo-del,
+.convo-del:focus-visible { opacity: 1; }
+/* Respect reduced-motion globally: neutralize spinners, pulses, caret blink, transitions. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
 .attach-btn {
   flex: none; width: 40px; height: 44px; border-radius: 10px;
   background: none; border: none; color: var(--text-faint); cursor: pointer;

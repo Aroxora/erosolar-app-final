@@ -188,6 +188,16 @@ function scrollToBottom(force) {
   const near = m.scrollHeight - m.scrollTop - m.clientHeight < 160;
   if (force || near) m.scrollTop = m.scrollHeight;
 }
+// Announce streaming status to screen readers via the polite live region.
+function announce(text) {
+  const el = document.getElementById("sr-status");
+  if (!el || !text) return;
+  // Clear then set so rapid/identical phases still register as a fresh mutation.
+  el.textContent = "";
+  requestAnimationFrame(() => {
+    el.textContent = text;
+  });
+}
 const activeBusy = () => state.activeId != null && state.runs.has(state.activeId);
 const userColRef = () => collection(db, "users", state.user.uid, "conversations");
 const convRef = (id) => doc(db, "users", state.user.uid, "conversations", id);
@@ -268,9 +278,16 @@ function renderConvList(convos) {
     row.className = "convo" + (c.id === state.activeId ? " active" : "");
     row.dataset.id = c.id;
 
-    const title = document.createElement("span");
+    // The TITLE is the activatable control (a real button → native keyboard + SR),
+    // not the row — so the nested Delete button stays valid and independently usable.
+    const title = document.createElement("button");
+    title.type = "button";
     title.className = "convo-title";
     title.textContent = c.title || "New chat";
+    title.addEventListener("click", (e) => {
+      e.stopPropagation();
+      selectConversation(c.id, c.title);
+    });
     row.appendChild(title);
 
     // Live indicator if this conversation is streaming.
@@ -284,6 +301,7 @@ function renderConvList(convos) {
     const del = document.createElement("button");
     del.className = "convo-del";
     del.title = "Delete conversation";
+    del.setAttribute("aria-label", "Delete conversation");
     del.innerHTML =
       '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg>';
     del.addEventListener("click", (e) => {
@@ -422,8 +440,15 @@ function addMessageView(msg) {
 
   const avatar = document.createElement("div");
   avatar.className = "msg-avatar";
+  avatar.setAttribute("aria-hidden", "true"); // decorative; speaker is announced via the sr-only label
   if (msg.role === "user") avatar.textContent = "🙂";
   wrap.appendChild(avatar);
+
+  // Screen-reader speaker label so turns aren't an ambiguous run-on of text.
+  const speaker = document.createElement("span");
+  speaker.className = "sr-only";
+  speaker.textContent = msg.role === "user" ? "You said:" : "Erosolar said:";
+  wrap.appendChild(speaker);
 
   const body = document.createElement("div");
   body.className = "msg-body";
@@ -934,7 +959,10 @@ function handleEvent(run, ev) {
       } else {
         msg.activityLabel = isExtract ? "Reading page content" : "Reading results";
       }
-      if (visible) setReasonSummary(msg, msg.activityLabel, true);
+      if (visible) {
+        setReasonSummary(msg, msg.activityLabel, true);
+        announce(msg.activityLabel);
+      }
       break;
     }
     case "content": {
@@ -945,6 +973,7 @@ function handleEvent(run, ev) {
       if (visible) {
         // Auto-collapse the reasoning log once the answer starts streaming.
         if (firstToken && msg._reasonDetails) msg._reasonDetails.open = false;
+        if (firstToken) announce("Writing the answer");
         setReasonSummary(msg, msg.activityLabel, true);
         scheduleContentRender(msg);
       }
@@ -972,10 +1001,14 @@ function handleEvent(run, ev) {
       msg.id = ev.messageId;
       if (typeof ev.memoryUsed === "number") msg.memoryUsed = ev.memoryUsed;
       if (ev.sources && ev.sources.length) msg.sources = ev.sources;
+      if (visible) announce("Answer ready");
       break;
     case "error":
       msg.content += (msg.content ? "\n\n" : "") + "⚠️ " + (ev.message || "Error");
-      if (visible) scheduleContentRender(msg);
+      if (visible) {
+        announce("Something went wrong");
+        scheduleContentRender(msg);
+      }
       break;
   }
 }
@@ -1060,15 +1093,43 @@ const memEls = {
 };
 
 memEls.open.addEventListener("click", openMemory);
-memEls.close.addEventListener("click", () => (memEls.modal.hidden = true));
+function closeMemory() {
+  memEls.modal.hidden = true;
+  memEls.open.focus(); // return focus to the trigger
+}
+memEls.close.addEventListener("click", closeMemory);
 memEls.modal.addEventListener("click", (e) => {
-  if (e.target === memEls.modal) memEls.modal.hidden = true;
+  if (e.target === memEls.modal) closeMemory();
 });
 memEls.clear.addEventListener("click", clearAllMemories);
+// Escape closes the memory dialog, else the mobile sidebar.
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  if (!memEls.modal.hidden) closeMemory();
+  else if (els.app.classList.contains("sidebar-open")) closeSidebar();
+});
+// Trap Tab within the open dialog (aria-modal) so focus can't drift to the chat behind it.
+memEls.modal.addEventListener("keydown", (e) => {
+  if (e.key !== "Tab") return;
+  const f = memEls.modal.querySelectorAll(
+    'a[href], button:not([disabled]), textarea, input, select, [tabindex]:not([tabindex="-1"])'
+  );
+  if (!f.length) return;
+  const first = f[0];
+  const last = f[f.length - 1];
+  if (e.shiftKey && document.activeElement === first) {
+    e.preventDefault();
+    last.focus();
+  } else if (!e.shiftKey && document.activeElement === last) {
+    e.preventDefault();
+    first.focus();
+  }
+});
 
 async function openMemory() {
   if (!state.user) return;
   memEls.modal.hidden = false;
+  memEls.close.focus(); // move focus into the dialog
   renderConnections();
   loadDocuments();
   memEls.profile.className = "profile-box";
@@ -1342,11 +1403,13 @@ async function deleteDocument(docId, item, del) {
 // Mobile sidebar
 function closeSidebar() {
   els.app.classList.remove("sidebar-open");
+  els.menuToggle.setAttribute("aria-expanded", "false");
   const scrim = document.querySelector(".scrim");
   if (scrim) scrim.remove();
 }
 els.menuToggle.addEventListener("click", () => {
   const open = els.app.classList.toggle("sidebar-open");
+  els.menuToggle.setAttribute("aria-expanded", String(open));
   if (open) {
     const scrim = document.createElement("div");
     scrim.className = "scrim";
