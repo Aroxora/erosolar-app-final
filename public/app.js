@@ -337,27 +337,98 @@ onAuthStateChanged(auth, (user) => {
 // ---------------------------------------------------------------------------
 // Conversation list (live)
 // ---------------------------------------------------------------------------
+let allConvos = [];
+let convSearch = "";
+
 function subscribeConversations() {
   const q = query(userColRef(), orderBy("updatedAt", "desc"));
   state.unsubConvos = onSnapshot(q, (snap) => {
-    const convos = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-    renderConvList(convos);
+    allConvos = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    renderConvFiltered();
     // If the active conversation was deleted elsewhere (and isn't mid-run), reset.
-    if (state.activeId && !state.runs.has(state.activeId) && !convos.some((c) => c.id === state.activeId)) {
+    if (state.activeId && !state.runs.has(state.activeId) && !allConvos.some((c) => c.id === state.activeId)) {
       resetToEmpty();
     }
   });
 }
 
-function renderConvList(convos) {
+// Apply the search filter + float pinned conversations to the top (stable sort
+// preserves the snapshot's updatedAt-desc order within each group).
+function renderConvFiltered() {
+  // Don't blow away a row mid-rename (a background snapshot must not detach the
+  // input and silently save a half-typed title). allConvos stays current; finish()
+  // reconciles when the edit ends.
+  if (els.convList.querySelector(".convo-rename-input")) return;
+  const term = convSearch;
+  const list = (term
+    ? allConvos.filter((c) => (c.title || "New chat").toLowerCase().includes(term))
+    : allConvos.slice()
+  ).sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0));
+  renderConvList(list, term);
+}
+
+async function togglePin(c) {
+  try {
+    await setDoc(convRef(c.id), { pinned: !c.pinned }, { merge: true });
+  } catch (e) {
+    toast("Could not update: " + (e.message || ""), "error");
+  }
+}
+
+// Inline-rename a conversation: swap the title button for an input.
+function startRename(row, titleBtn, c) {
+  if (row.querySelector(".convo-rename-input")) return;
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "convo-rename-input";
+  input.value = c.title || "";
+  input.maxLength = 80;
+  titleBtn.replaceWith(input);
+  input.focus();
+  input.select();
+  let done = false;
+  const finish = async (save) => {
+    if (done) return;
+    done = true;
+    const newTitle = input.value.trim().slice(0, 80);
+    // Only persist while still attached — a detach-driven blur can't save a stale title.
+    if (save && input.isConnected && newTitle && newTitle !== (c.title || "")) {
+      try {
+        await setDoc(convRef(c.id), { title: newTitle }, { merge: true });
+        if (state.activeId === c.id) els.title.textContent = newTitle;
+      } catch (e) {
+        toast("Could not rename: " + (e.message || ""), "error");
+      }
+    }
+    if (input.isConnected) input.replaceWith(titleBtn);
+    renderConvFiltered(); // reconcile now that no input is open (covers cancel + deferred snapshots)
+  };
+  input.addEventListener("keydown", (e) => {
+    e.stopPropagation();
+    if (e.key === "Enter") { e.preventDefault(); finish(true); }
+    else if (e.key === "Escape") { e.preventDefault(); finish(false); }
+  });
+  input.addEventListener("blur", () => finish(true));
+}
+
+function renderConvList(convos, term) {
   els.convList.innerHTML = "";
+  if (!convos.length) {
+    if (term) {
+      const empty = document.createElement("div");
+      empty.className = "convo-empty";
+      empty.textContent = "No chats match.";
+      els.convList.appendChild(empty);
+    }
+    return;
+  }
   for (const c of convos) {
     const row = document.createElement("div");
-    row.className = "convo" + (c.id === state.activeId ? " active" : "");
+    row.className = "convo" + (c.id === state.activeId ? " active" : "") + (c.pinned ? " pinned" : "");
     row.dataset.id = c.id;
 
     // The TITLE is the activatable control (a real button → native keyboard + SR),
-    // not the row — so the nested Delete button stays valid and independently usable.
+    // not the row — so the action buttons stay valid and independently usable.
     const title = document.createElement("button");
     title.type = "button";
     title.className = "convo-title";
@@ -376,8 +447,34 @@ function renderConvList(convos) {
       row.appendChild(dot);
     }
 
+    const pin = document.createElement("button");
+    pin.type = "button";
+    pin.className = "convo-act convo-pin" + (c.pinned ? " on" : "");
+    pin.title = c.pinned ? "Unpin" : "Pin to top";
+    pin.setAttribute("aria-label", pin.title);
+    pin.innerHTML =
+      '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M14 2l8 8-3 1-3 5 1 3-2 2-4-4-5 5-1-1 5-5-4-4 2-2 3 1 5-3 1-3z"/></svg>';
+    pin.addEventListener("click", (e) => {
+      e.stopPropagation();
+      togglePin(c);
+    });
+    row.appendChild(pin);
+
+    const ren = document.createElement("button");
+    ren.type = "button";
+    ren.className = "convo-act convo-ren";
+    ren.title = "Rename";
+    ren.setAttribute("aria-label", "Rename conversation");
+    ren.innerHTML =
+      '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>';
+    ren.addEventListener("click", (e) => {
+      e.stopPropagation();
+      startRename(row, title, c);
+    });
+    row.appendChild(ren);
+
     const del = document.createElement("button");
-    del.className = "convo-del";
+    del.className = "convo-act convo-del";
     del.title = "Delete conversation";
     del.setAttribute("aria-label", "Delete conversation");
     del.innerHTML =
@@ -392,6 +489,12 @@ function renderConvList(convos) {
     els.convList.appendChild(row);
   }
 }
+
+// Search box filters the conversation list (client-side, by title).
+document.getElementById("conv-search")?.addEventListener("input", (e) => {
+  convSearch = e.target.value.trim().toLowerCase();
+  renderConvFiltered();
+});
 
 async function deleteConversation(id, label) {
   if (!(await confirmDialog(`Delete "${label}"?`, { confirmText: "Delete", danger: true }))) return;
@@ -1261,7 +1364,9 @@ function refreshConvLiveDot(convId) {
     const dot = document.createElement("span");
     dot.className = "convo-live";
     dot.title = "Responding…";
-    row.insertBefore(dot, row.querySelector(".convo-del"));
+    const t = row.querySelector(".convo-title"); // sit right after the title, matching the full render
+    if (t) t.after(dot);
+    else row.appendChild(dot);
   } else if (!running && existing) {
     existing.remove();
   }

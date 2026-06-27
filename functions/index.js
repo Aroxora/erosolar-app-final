@@ -53,8 +53,8 @@ const VERTEX_LOCATION = "us-central1";
 const EMBED_MODEL = "text-embedding-005"; // 768-dim, within Firestore's vector limit
 const EMBED_INPUT_CHARS = 8000;
 const MEMORY_TOP_K = 6; // nearest neighbours fetched
-const MEMORY_KEEP = 5; // injected after filtering out the current chat
-const MEMORY_MAX_DISTANCE = 0.6; // COSINE distance ceiling (lower = more similar)
+const MEMORY_KEEP = 4; // injected after filtering out the current chat
+const MEMORY_MAX_DISTANCE = 0.5; // COSINE distance ceiling (lower = more similar/precise)
 const MEMORY_TEXT_CHARS = 600; // per-memory snippet length in the prompt
 const MEMORY_DEDUP_DISTANCE = 0.08; // skip a new memory this close to an existing one
 

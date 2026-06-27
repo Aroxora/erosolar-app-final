@@ -131,7 +131,33 @@ body {
   cursor: pointer; padding: 2px; border-radius: 6px; display: grid; place-items: center;
 }
 .convo:hover .convo-del { opacity: 1; }
-.convo-del:hover { color: var(--danger); background: rgba(226, 96, 63, 0.12); }
+/* Shared hover-revealed row action buttons (pin / rename / delete). */
+.convo-act {
+  flex: none; opacity: 0; border: none; background: none; color: var(--text-faint);
+  cursor: pointer; padding: 2px; border-radius: 6px; display: grid; place-items: center;
+  transition: opacity 0.12s ease, color 0.12s ease, background 0.12s ease;
+}
+.convo:hover .convo-act,
+.convo:focus-within .convo-act,
+.convo-act:focus-visible { opacity: 1; }
+.convo-act:hover { color: var(--text); background: var(--panel-2); }
+.convo-del:hover { color: var(--danger); background: rgba(255, 107, 107, 0.12); }
+.convo-pin.on { opacity: 1; color: var(--accent-2); }
+.convo-rename-input {
+  flex: 1; min-width: 0; font: inherit; font-size: 14px;
+  background: var(--bg-2); color: var(--text);
+  border: 1px solid var(--accent); border-radius: 6px; padding: 2px 6px;
+}
+.convo-rename-input:focus { outline: none; }
+.convo-empty { color: var(--text-faint); font-size: 13px; padding: 10px; text-align: center; }
+.conv-search {
+  width: auto; box-sizing: border-box; margin: 0 8px 8px;
+  background: var(--bg-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: 9px;
+  padding: 8px 12px; font: inherit; font-size: 13px;
+}
+.conv-search:focus { outline: none; border-color: var(--accent); }
+.conv-search::placeholder { color: var(--text-faint); }
 
 .sidebar-foot {
   display: flex; align-items: center; gap: 10px;
