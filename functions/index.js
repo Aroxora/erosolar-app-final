@@ -1275,6 +1275,8 @@ exports.api = onRequest(
       let lastFinishReason = "";
       let promptTokens = 0;
       let completionTokens = 0;
+      let cacheHitTokens = 0; // DeepSeek prefix-cache hits (re-sent context, ~10x cheaper)
+      let cacheMissTokens = 0;
       let roundsUsed = 0;
 
       for (let round = 0; round <= MAX_TOOL_ROUNDS; round++) {
@@ -1312,6 +1314,8 @@ exports.api = onRequest(
         if (usage) {
           promptTokens += usage.prompt_tokens || 0;
           completionTokens += usage.completion_tokens || 0;
+          cacheHitTokens += usage.prompt_cache_hit_tokens || 0;
+          cacheMissTokens += usage.prompt_cache_miss_tokens || 0;
         }
         if (finishReason) lastFinishReason = finishReason;
 
@@ -1533,6 +1537,8 @@ exports.api = onRequest(
         rounds: roundsUsed,
         promptTokens,
         completionTokens,
+        cacheHitTokens,
+        cacheMissTokens,
         totalTokens: promptTokens + completionTokens,
         sources: sources.length,
         memoryUsed,
