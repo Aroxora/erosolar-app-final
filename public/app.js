@@ -548,7 +548,9 @@ function scheduleContentRender(msg) {
   requestAnimationFrame(() => {
     rafPending = false;
     const m = rafMsg;
-    if (m && m._contentEl && state.activeId === m.convId) {
+    // Skip a stale frame once the turn is finalized — otherwise this repaint would
+    // wipe the copy buttons / highlighting / citation links finalizeAssistant added.
+    if (m && m.streaming && m._contentEl && state.activeId === m.convId) {
       paintAssistant(m);
       scrollToBottom(false);
     }
@@ -848,6 +850,109 @@ function renderError(msg) {
   msg._body.appendChild(box);
 }
 
+// Lazy-load highlight.js (and its theme) only when a code block actually appears.
+let _hljs = null;
+let _hljsLoading = null;
+function loadHljs() {
+  if (_hljs) return Promise.resolve(_hljs);
+  if (!_hljsLoading) {
+    const link = document.createElement("link");
+    link.rel = "stylesheet";
+    link.href = "https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css";
+    document.head.appendChild(link);
+    _hljsLoading = import("https://cdn.jsdelivr.net/npm/highlight.js@11/+esm")
+      .then((m) => ((_hljs = m.default || m), _hljs))
+      .catch(() => null);
+  }
+  return _hljsLoading;
+}
+
+// Per-block Copy button (immediate) + lazy syntax highlighting for each code block.
+function enhanceCodeBlocks(root) {
+  if (!root) return;
+  const blocks = [...root.querySelectorAll("pre > code")].filter((c) => !c.dataset.enh);
+  if (!blocks.length) return;
+  for (const code of blocks) {
+    code.dataset.enh = "1";
+    const pre = code.parentElement;
+    if (!pre || pre.tagName !== "PRE") continue;
+    // Wrap <pre> in a NON-scrolling container so the copy button stays pinned to the
+    // visible corner instead of scrolling away with wide code.
+    let wrap = pre.parentElement;
+    if (!wrap || !wrap.classList.contains("code-wrap")) {
+      wrap = document.createElement("div");
+      wrap.className = "code-wrap";
+      pre.parentNode.insertBefore(wrap, pre);
+      wrap.appendChild(pre);
+    }
+    if (!wrap.querySelector(".code-copy")) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "code-copy";
+      btn.textContent = "Copy";
+      btn.addEventListener("click", async () => {
+        try {
+          await navigator.clipboard.writeText(code.textContent || "");
+          btn.textContent = "Copied";
+        } catch {
+          btn.textContent = "Failed";
+        }
+        setTimeout(() => (btn.textContent = "Copy"), 1500);
+      });
+      wrap.appendChild(btn);
+    }
+  }
+  loadHljs().then((hljs) => {
+    if (hljs) for (const code of blocks) try { hljs.highlightElement(code); } catch {}
+  });
+}
+
+// Turn inline [n] citation markers into superscript links to the matching source.
+function linkCitations(root, sources) {
+  if (!root || !sources || !sources.length) return;
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode: (node) =>
+      node.parentElement &&
+      !node.parentElement.closest("pre, code, a, sup") &&
+      /\[\d+\]/.test(node.nodeValue)
+        ? NodeFilter.FILTER_ACCEPT
+        : NodeFilter.FILTER_REJECT,
+  });
+  const targets = [];
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) targets.push(n);
+  for (const textNode of targets) {
+    const text = textNode.nodeValue;
+    const frag = document.createDocumentFragment();
+    const re = /\[(\d+)\]/g;
+    let last = 0;
+    let m;
+    while ((m = re.exec(text))) {
+      const before = m.index > 0 ? text[m.index - 1] : "";
+      const src = sources[parseInt(m[1], 10) - 1];
+      frag.appendChild(document.createTextNode(text.slice(last, m.index)));
+      // Link only safe http(s) sources; skip identifier-like "arr[2]" (a letter / _ /
+      // $ right before the bracket — a digit prefix still links).
+      if (src && /^https?:\/\//i.test(src.url || "") && !/[A-Za-z_$]/.test(before)) {
+        const sup = document.createElement("sup");
+        const a = document.createElement("a");
+        a.href = src.url;
+        a.target = "_blank";
+        a.rel = "noopener noreferrer";
+        a.className = "cite";
+        a.textContent = m[0];
+        a.title = src.title || src.url;
+        sup.appendChild(a);
+        frag.appendChild(sup);
+      } else {
+        frag.appendChild(document.createTextNode(m[0]));
+      }
+      last = m.index + m[0].length;
+    }
+    frag.appendChild(document.createTextNode(text.slice(last)));
+    textNode.parentNode.replaceChild(frag, textNode);
+  }
+}
+
 function finalizeAssistant(msg) {
   if (msg._reasonDetails) {
     msg._reasonDetails.open = false;
@@ -858,6 +963,8 @@ function finalizeAssistant(msg) {
   updateReasonVisibility(msg);
   renderMemoryNote(msg);
   paintAssistant(msg);
+  enhanceCodeBlocks(msg._contentEl);
+  linkCitations(msg._contentEl, msg.sources);
   renderSources(msg);
   if (msg.content && msg.content.trim()) addAssistantCopy(msg); // no copy on a pure-error turn
   renderError(msg);

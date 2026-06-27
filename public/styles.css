@@ -457,6 +457,26 @@ body:has(#app[hidden]) .skip-link { display: none; }
   padding: 5px 14px; border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 600;
 }
 .retry-btn:hover { border-color: var(--accent); color: var(--accent-2); }
+
+/* ===================== Code blocks + citations ===================== */
+.code-wrap { position: relative; }
+.code-copy {
+  position: absolute; top: 8px; right: 8px;
+  font-size: 11px; font-weight: 600; padding: 3px 9px; border-radius: 6px;
+  background: var(--panel-2); color: var(--text-dim);
+  border: 1px solid var(--border); cursor: pointer; opacity: 0;
+  transition: opacity 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+.code-wrap:hover .code-copy,
+.code-copy:focus-visible { opacity: 1; }
+.code-copy:hover { color: var(--text); border-color: var(--accent); }
+/* Touch devices have no hover — keep the copy button visible. */
+@media (hover: none) { .code-copy { opacity: 1; } }
+/* Keep our own code-block background even after highlight.js adds .hljs. */
+.content pre code.hljs { background: none; padding: 0; }
+/* Inline citation links. */
+.cite { color: var(--accent-2); text-decoration: none; font-weight: 600; font-size: 0.82em; padding: 0 1px; }
+.cite:hover { text-decoration: underline; }
 .attach-btn {
   flex: none; width: 40px; height: 44px; border-radius: 10px;
   background: none; border: none; color: var(--text-faint); cursor: pointer;
