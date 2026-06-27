@@ -1,8 +1,13 @@
 # Erosolar
 
-*Erosolar is the AI assistant built by **ErosolarAI**, the company behind it.*
+*Built by **ErosolarAI** — the company behind it ([erosolarai.com](https://erosolarai.com)).*
 
-A clean, fast AI assistant on **Firebase Hosting**, served at **www.ero.solar** — with a native **iOS** app coming soon.
+> **Goal — a perpetual home for a chatbot.** ero.solar exists to be a long-term, durable home
+> for a chatbot — and, in time, more. This isn't a throwaway demo: the stack (static Firebase
+> Hosting + a single streaming Cloud Function + Firestore) is deliberately chosen to keep running
+> cheaply and reliably for years, and to grow into whatever it needs to become next.
+
+A clean, fast AI assistant served at **www.ero.solar**, with a native **iOS** app coming soon.
 
 - **Model:** DeepSeek **v4 Pro** — a reasoning model that *shows its thinking* before it answers
 - **Live web search:** Tavily, exposed to the model as a `web_search` tool it calls on demand (multi-round)
