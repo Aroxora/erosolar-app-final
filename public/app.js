@@ -108,11 +108,11 @@ window.__erosolarGoogleCredential = async (idToken, accessToken) => {
     await signInWithCredential(auth, GoogleAuthProvider.credential(idToken, accessToken || null));
     track("login", { method: "google", via: "native" });
   } catch (e) {
-    alert("Sign-in failed: " + (e.message || e.code));
+    toast("Sign-in failed: " + (e.message || e.code), "error");
   }
 };
 window.__erosolarGoogleError = (msg) => {
-  if (msg) alert("Google sign-in: " + msg);
+  if (msg) toast("Google sign-in: " + msg, "error");
 };
 // Native connector flow result: an access token carrying Calendar/Gmail/Drive scopes.
 window.__erosolarGoogleConnect = (accessToken, expiresIn) => {
@@ -202,6 +202,79 @@ function announce(text) {
     el.textContent = text;
   });
 }
+
+// ---------------------------------------------------------------------------
+// Toasts + confirm dialog — on-brand replacements for native alert()/confirm(),
+// which are off-theme and silently swallowed inside the iOS WKWebView wrapper.
+// ---------------------------------------------------------------------------
+function toast(message, kind) {
+  const host = document.getElementById("toasts");
+  if (!host) return;
+  const el = document.createElement("div");
+  el.className = "toast" + (kind ? " toast-" + kind : "");
+  el.setAttribute("role", kind === "error" ? "alert" : "status");
+  el.textContent = message;
+  host.appendChild(el);
+  requestAnimationFrame(() => el.classList.add("show"));
+  setTimeout(() => {
+    el.classList.remove("show");
+    setTimeout(() => el.remove(), 250);
+  }, kind === "error" ? 5200 : 3500);
+}
+
+function confirmDialog(message, opts = {}) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.className = "confirm-overlay";
+    overlay.setAttribute("role", "dialog");
+    overlay.setAttribute("aria-modal", "true");
+    overlay.setAttribute("aria-labelledby", "confirm-msg");
+    const card = document.createElement("div");
+    card.className = "confirm-card";
+    const msg = document.createElement("p");
+    msg.className = "confirm-msg";
+    msg.id = "confirm-msg";
+    msg.textContent = message;
+    const row = document.createElement("div");
+    row.className = "confirm-actions";
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "btn-cancel";
+    cancel.textContent = opts.cancelText || "Cancel";
+    const ok = document.createElement("button");
+    ok.type = "button";
+    ok.className = "btn-confirm" + (opts.danger ? " danger" : "");
+    ok.textContent = opts.confirmText || "Confirm";
+    row.append(cancel, ok);
+    card.append(msg, row);
+    overlay.appendChild(card);
+    document.body.appendChild(overlay);
+    const prevFocus = document.activeElement;
+    const close = (result) => {
+      document.removeEventListener("keydown", onKey, true);
+      overlay.remove();
+      if (prevFocus && prevFocus.focus) try { prevFocus.focus(); } catch {}
+      resolve(result);
+    };
+    const onKey = (e) => {
+      if (e.key !== "Escape" && e.key !== "Enter" && e.key !== "Tab") return;
+      e.stopPropagation(); // don't also trip the modal/sidebar Escape behind this dialog
+      e.preventDefault();
+      if (e.key === "Escape") close(false);
+      else if (e.key === "Enter") close(document.activeElement !== cancel); // Enter on Cancel = cancel
+      else (document.activeElement === ok ? cancel : ok).focus();
+    };
+    document.addEventListener("keydown", onKey, true);
+    cancel.addEventListener("click", () => close(false));
+    ok.addEventListener("click", () => close(true));
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) close(false); });
+    requestAnimationFrame(() => {
+      overlay.classList.add("show");
+      // Focus the SAFE action on destructive dialogs so an accidental keypress cancels.
+      (opts.danger ? cancel : ok).focus();
+    });
+  });
+}
 const activeBusy = () => state.activeId != null && state.runs.has(state.activeId);
 const userColRef = () => collection(db, "users", state.user.uid, "conversations");
 const convRef = (id) => doc(db, "users", state.user.uid, "conversations", id);
@@ -222,7 +295,7 @@ els.googleSignin.addEventListener("click", async () => {
     track("login", { method: "google", via: "popup" });
     if (getAdditionalUserInfo(result)?.isNewUser) track("sign_up", { method: "google" });
   } catch (e) {
-    alert("Sign-in failed: " + (e.message || e.code));
+    toast("Sign-in failed: " + (e.message || e.code), "error");
   }
 });
 els.signout.addEventListener("click", () => {
@@ -320,12 +393,12 @@ function renderConvList(convos) {
 }
 
 async function deleteConversation(id, label) {
-  if (!confirm(`Delete "${label}"?`)) return;
+  if (!(await confirmDialog(`Delete "${label}"?`, { confirmText: "Delete", danger: true }))) return;
   try {
     await deleteDoc(convRef(id));
     if (state.activeId === id) resetToEmpty();
   } catch (e) {
-    alert("Could not delete: " + e.message);
+    toast("Could not delete: " + e.message, "error");
   }
 }
 
@@ -747,7 +820,7 @@ async function connectGoogle() {
       track("connect_google", { via: "popup" });
     }
   } catch (e) {
-    alert("Could not connect Google: " + (e.message || e.code || ""));
+    toast("Could not connect Google: " + (e.message || e.code || ""), "error");
   }
   renderConnections();
 }
@@ -993,7 +1066,7 @@ async function sendMessage(text) {
   try {
     convId = await ensureConversation();
   } catch (e) {
-    alert("Could not start a conversation: " + e.message);
+    toast("Could not start a conversation: " + e.message, "error");
     return;
   }
   track("message_sent", { length: text.length });
@@ -1373,7 +1446,7 @@ function renderMemoryList(docs) {
         if (!memEls.list.children.length) memEmpty();
       } catch (e) {
         del.disabled = false;
-        alert("Could not delete: " + e.message);
+        toast("Could not delete: " + e.message, "error");
       }
     });
 
@@ -1385,7 +1458,7 @@ function renderMemoryList(docs) {
 
 async function clearAllMemories() {
   if (!state.user) return;
-  if (!confirm("Forget ALL stored memories? This can't be undone. (Your chat history is not affected.)")) return;
+  if (!(await confirmDialog("Forget ALL stored memories? This can't be undone. (Your chat history is not affected.)", { confirmText: "Forget all", danger: true }))) return;
   memEls.clear.disabled = true;
   try {
     for (;;) {
@@ -1398,7 +1471,7 @@ async function clearAllMemories() {
     }
     memEmpty();
   } catch (e) {
-    alert("Could not clear: " + e.message);
+    toast("Could not clear: " + e.message, "error");
   } finally {
     memEls.clear.disabled = false;
   }
@@ -1541,7 +1614,7 @@ async function loadDocuments() {
 }
 
 async function deleteDocument(docId, item, del) {
-  if (!confirm("Delete this document and everything Erosolar learned from it?")) return;
+  if (!(await confirmDialog("Delete this document and everything Erosolar learned from it?", { confirmText: "Delete", danger: true }))) return;
   del.disabled = true;
   try {
     for (;;) {
@@ -1560,7 +1633,7 @@ async function deleteDocument(docId, item, del) {
       upEls.docList.innerHTML = '<div class="mem-empty">No documents uploaded yet.</div>';
   } catch (e) {
     del.disabled = false;
-    alert("Could not delete: " + e.message);
+    toast("Could not delete: " + e.message, "error");
   }
 }
 
