@@ -735,6 +735,18 @@ function chunkText(text) {
   return chunks;
 }
 
+// Greetings / acknowledgements where cross-chat recall adds nothing. For these we
+// skip the embedding + vector search on the way in AND skip storing them as memories
+// on the way out — saves cost/latency and keeps the memory store free of low-value
+// "hi"/"thanks" notes that would otherwise get recalled later. The always-on profile
+// still personalizes the reply (e.g. greeting the user by name).
+const TRIVIAL_MSG_RE =
+  /^(hi+|hey+|hello+|yo+|sup|hiya|heya|howdy|gm|gn|good\s*(morning|afternoon|evening|night)|thanks?|thank\s*you|thx|ty|tysm|cheers|cool|nice|great|awesome|perfect|ok|okay|kk?|got\s*it|gotcha|np|no\s*problem|welcome|lol|lmao|haha+|hehe+|yes|no|yep|nope|yeah|nah|sure|fine|right|done|bye+|goodbye|cya|see\s*ya|ttyl)[\s!.…,]*$/i;
+function isTrivialMessage(text) {
+  const t = (text || "").trim();
+  return t.length <= 40 && TRIVIAL_MSG_RE.test(t);
+}
+
 // Recall snippets from the user's OTHER conversations relevant to the new query.
 async function retrieveMemories(uid, queryText, currentConvId) {
   const qvec = await embed(queryText, "RETRIEVAL_QUERY");
@@ -1182,11 +1194,14 @@ exports.api = onRequest(
       }
 
       // Cross-conversation memory — recall relevant notes from the user's OTHER
-      // chats. Best-effort: any failure degrades gracefully to no memory.
+      // chats. Best-effort: any failure degrades gracefully to no memory. Skipped
+      // for trivial greetings/acks (e.g. "hi", "thanks") — no embedding, no vector
+      // search, no irrelevant notes injected; the always-on profile still personalizes.
+      const trivial = isTrivialMessage(userText);
       let memoryContext = "";
       let memoryUsed = 0;
       try {
-        const mems = await retrieveMemories(uid, userText, conversationId);
+        const mems = trivial ? [] : await retrieveMemories(uid, userText, conversationId);
         if (mems.length) {
           memoryUsed = mems.length;
           memoryContext =
@@ -1502,7 +1517,9 @@ exports.api = onRequest(
         const builders = [];
         // Turns that read private Google data are NOT persisted to long-term memory
         // or distilled into the profile (the answer can quote private email/files).
-        if (!usedPrivateConnector) {
+        // Don't store trivial greetings/acks as memories (keeps recall clean) or
+        // distill a profile from them (no durable facts) — saves embeds + a flash call.
+        if (!usedPrivateConnector && !trivial) {
           builders.push(buildMemoryDoc(uid, conversationId, "user", userText));
           builders.push(buildMemoryDoc(uid, conversationId, "assistant", finalContent));
         }
@@ -1511,7 +1528,7 @@ exports.api = onRequest(
           builders.push(buildMemoryDoc(uid, conversationId, "web", text, l.url));
         }
         const [profileVal, memorySettled] = await Promise.all([
-          usedPrivateConnector
+          usedPrivateConnector || trivial
             ? Promise.resolve(null)
             : profileUpdate(profileText, userText, finalContent, deepseekKey).catch((e) => {
                 logger.warn("profile update failed", { error: e.message });
