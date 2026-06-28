@@ -364,6 +364,29 @@ body {
 }
 .regen-btn:hover { opacity: 1; color: var(--text); background: var(--panel); border-color: var(--border); }
 .msg:hover .regen-btn { opacity: 1; }
+.edit-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: none; border: 1px solid transparent; color: var(--text-faint);
+  font: inherit; font-size: 12px; padding: 4px 8px; border-radius: 7px; cursor: pointer;
+  opacity: 0.6; transition: opacity 0.15s ease, color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+}
+.edit-btn:hover { opacity: 1; color: var(--text); background: var(--panel); border-color: var(--border); }
+.msg:hover .edit-btn { opacity: 1; }
+.edit-input {
+  width: 100%; box-sizing: border-box; resize: vertical; min-height: 56px;
+  background: var(--bg-2); color: var(--text); border: 1px solid var(--accent);
+  border-radius: 10px; padding: 9px 11px; font: inherit; font-size: 15px; line-height: 1.5;
+}
+.edit-input:focus { outline: none; }
+.edit-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+.edit-cancel, .edit-send {
+  padding: 6px 16px; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer;
+  border: 1px solid var(--border);
+}
+.edit-cancel { background: none; color: var(--text-dim); }
+.edit-cancel:hover { color: var(--text); border-color: var(--text-faint); }
+.edit-send { background: var(--accent); color: #0b0b18; border-color: transparent; }
+.edit-send:hover { background: var(--accent-2); }
 
 /* Sources */
 .sources { margin-top: 14px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }

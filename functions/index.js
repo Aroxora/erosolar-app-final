@@ -1579,8 +1579,10 @@ exports.api = onRequest(
       const turnBatch = db.batch();
       // On a rewind (regenerate/edit) the anchor user message already exists; only the
       // new assistant message is written. `ts` (now) sorts after the older anchor.
+      let userMsgRef = null;
       if (!isRewind) {
-        turnBatch.set(msgsRef.doc(), { role: "user", content: userText, createdAt: ts });
+        userMsgRef = msgsRef.doc();
+        turnBatch.set(userMsgRef, { role: "user", content: userText, createdAt: ts });
       }
       const assistantRef = msgsRef.doc();
       turnBatch.set(assistantRef, {
@@ -1603,7 +1605,13 @@ exports.api = onRequest(
       if (rewindEditRef) turnBatch.update(rewindEditRef, { content: userText });
       await turnBatch.commit();
 
-      send({ type: "done", messageId: assistantRef.id, sources, memoryUsed });
+      send({
+        type: "done",
+        messageId: assistantRef.id,
+        userMessageId: userMsgRef ? userMsgRef.id : null,
+        sources,
+        memoryUsed,
+      });
       // Per-turn cost/observability — invisible until the bill arrives otherwise.
       logger.info("chat_complete", {
         reqId,

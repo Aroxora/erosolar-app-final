@@ -577,6 +577,7 @@ async function selectConversation(id, title) {
     snap.forEach((d) => {
       const data = d.data();
       addMessageView({
+        id: d.id,
         role: data.role,
         content: data.content || "",
         reasoning: data.reasoning || "",
@@ -642,7 +643,10 @@ function addMessageView(msg) {
     content.className = "content";
     content.textContent = msg.content;
     body.appendChild(content);
+    msg._contentEl = content;
+    msg._body = body;
     addCopyButton(body, () => msg.content);
+    if (msg.id) addEditButton(msg); // edit-and-resend (needs the doc id)
   } else {
     msg._body = body;
 
@@ -984,8 +988,11 @@ function addAssistantCopy(msg) {
 
 // Finalize the assistant turn: collapse the reasoning log (still above the
 // answer), ensure the full answer + sources are rendered, add the copy button.
-// Recoverable failed turn: re-stream the same prompt. The failed turn was never
-// persisted server-side, so this is a clean re-run, not a duplicate.
+// Recoverable failed turn: re-stream the same prompt. A failed turn was never
+// persisted server-side, so a plain re-run is a clean re-run, not a duplicate.
+// For an edit/regen, we carry the rewind (_retryRewind) through so Retry re-issues
+// the SAME rewind — the server re-applies the edit + tail-delete atomically against
+// the still-intact history, instead of appending a corrupting new turn.
 function retryTurn(failedMsg) {
   const text = failedMsg._retryText;
   const convId = failedMsg.convId;
@@ -997,7 +1004,10 @@ function retryTurn(failedMsg) {
     role: "assistant", content: "", reasoning: "", sources: [],
     streaming: true, convId, activityLabel: "Reasoning",
   };
-  const run = { convId, userMsg: { role: "user", content: text }, aMsg, controller: new AbortController() };
+  const run = {
+    convId, userMsg: { role: "user", content: text }, aMsg,
+    controller: new AbortController(), rewind: failedMsg._retryRewind,
+  };
   state.runs.set(convId, run);
   if (state.activeId === convId) {
     addMessageView(aMsg);
@@ -1178,6 +1188,111 @@ function addRegenButton(msg) {
   }
 }
 
+// Edit-and-resend: edit a past USER message, then re-run from there. The server
+// rewinds — deletes the old answer + all later turns and regenerates.
+// Returns true if the edit was consumed (editor replaced + run started), false on
+// a no-op (busy/invalid) so the caller can restore the inline editor.
+function submitEdit(userMsg, newText) {
+  if (activeBusy()) return false;
+  const convId = userMsg.convId || state.activeId;
+  const fromMessageId = userMsg.id;
+  if (!convId || !fromMessageId || !newText.trim()) return false;
+  userMsg.content = newText;
+  if (userMsg._contentEl) userMsg._contentEl.textContent = newText;
+  const idx = state.messages.indexOf(userMsg);
+  if (idx >= 0) state.messages.splice(idx + 1).forEach((m) => m._el && m._el.remove());
+  els.messages.querySelectorAll(".retry-btn, .regen-btn").forEach((b) => b.remove());
+  const aMsg = {
+    role: "assistant", content: "", reasoning: "", sources: [],
+    streaming: true, convId, activityLabel: "Reasoning",
+  };
+  const run = {
+    convId, userMsg: { role: "user", content: newText }, aMsg,
+    controller: new AbortController(), rewind: { fromMessageId },
+  };
+  state.runs.set(convId, run);
+  if (state.activeId === convId) {
+    addMessageView(aMsg);
+    scrollToBottom(true);
+  }
+  updateComposer();
+  refreshConvLiveDot(convId);
+  streamRun(run, newText);
+  return true;
+}
+
+function startEditMessage(userMsg) {
+  if (activeBusy() || !userMsg._contentEl) return;
+  const contentEl = userMsg._contentEl;
+  if (contentEl.querySelector(".edit-input")) return; // already editing
+  const original = userMsg.content || "";
+  const ta = document.createElement("textarea");
+  ta.className = "edit-input";
+  ta.value = original;
+  ta.rows = Math.min(8, (original.match(/\n/g) || []).length + 2);
+  const actions = document.createElement("div");
+  actions.className = "edit-actions";
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "edit-cancel";
+  cancel.textContent = "Cancel";
+  const send = document.createElement("button");
+  send.type = "button";
+  send.className = "edit-send";
+  send.textContent = "Send";
+  actions.append(cancel, send);
+  contentEl.textContent = "";
+  contentEl.append(ta, actions);
+  ta.focus();
+  ta.setSelectionRange(ta.value.length, ta.value.length);
+  const restore = () => {
+    contentEl.textContent = original;
+  };
+  const doSend = () => {
+    const newText = ta.value.trim();
+    if (!newText || newText === original.trim()) {
+      restore();
+      return;
+    }
+    // submitEdit replaces the editor with the new text + re-runs. If it no-ops
+    // (a response is mid-flight), restore the bubble so the editor isn't stranded.
+    if (!submitEdit(userMsg, newText)) {
+      restore();
+      if (typeof toast === "function") toast("Wait for the current response to finish.");
+    }
+  };
+  cancel.addEventListener("click", restore);
+  send.addEventListener("click", doSend);
+  ta.addEventListener("keydown", (e) => {
+    e.stopPropagation();
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      doSend();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      restore();
+    }
+  });
+}
+
+function addEditButton(msg) {
+  if (!msg._body || msg._body.querySelector(".edit-btn")) return;
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "edit-btn";
+  btn.innerHTML =
+    '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg><span>Edit</span>';
+  btn.addEventListener("click", () => startEditMessage(msg));
+  const row = msg._body.querySelector(".msg-actions");
+  if (row) row.appendChild(btn);
+  else {
+    const r = document.createElement("div");
+    r.className = "msg-actions";
+    r.appendChild(btn);
+    msg._body.appendChild(r);
+  }
+}
+
 function finalizeAssistant(msg) {
   if (msg._reasonDetails) {
     msg._reasonDetails.open = false;
@@ -1307,7 +1422,7 @@ async function streamRun(run, text) {
       // persisted a partial turn, so re-running would DUPLICATE it. (Server
       // type:error events stay retryable — they never persist; see handleEvent.)
       aMsg.error = err.message || "Something went wrong.";
-      if (!aMsg.content.trim()) aMsg._retryText = text;
+      if (!aMsg.content.trim()) { aMsg._retryText = text; aMsg._retryRewind = run.rewind; }
     }
   } finally {
     aMsg.streaming = false;
@@ -1394,11 +1509,17 @@ function handleEvent(run, ev) {
       msg.id = ev.messageId;
       if (typeof ev.memoryUsed === "number") msg.memoryUsed = ev.memoryUsed;
       if (ev.sources && ev.sources.length) msg.sources = ev.sources;
+      // Now that the user message has a server id, enable edit-and-resend on it.
+      if (ev.userMessageId && run.userMsg) {
+        run.userMsg.id = ev.userMessageId;
+        if (visible) addEditButton(run.userMsg);
+      }
       if (visible) announce("Answer ready");
       break;
     case "error":
       msg.error = ev.message || "Error";
       msg._retryText = run.userMsg.content; // preserve the prompt for one-click Retry
+      msg._retryRewind = run.rewind; // …and the rewind, so Retry re-runs the edit/regen (not a new turn)
       if (visible) announce("Something went wrong");
       break;
   }
