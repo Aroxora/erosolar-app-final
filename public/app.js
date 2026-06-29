@@ -109,11 +109,11 @@ window.__erosolarGoogleCredential = async (idToken, accessToken) => {
     await signInWithCredential(auth, GoogleAuthProvider.credential(idToken, accessToken || null));
     track("login", { method: "google", via: "native" });
   } catch (e) {
-    toast("Sign-in failed: " + (e.message || e.code), "error");
+    toast(tr("signinFail") + (e.message || e.code), "error");
   }
 };
 window.__erosolarGoogleError = (msg) => {
-  if (msg) toast("Google sign-in: " + msg, "error");
+  if (msg) toast(tr("googleSignin") + msg, "error");
 };
 // Native connector flow result: an access token carrying Calendar/Gmail/Drive scopes.
 window.__erosolarGoogleConnect = (accessToken, expiresIn) => {
@@ -164,7 +164,326 @@ const els = {
   userName: $("#user-name"),
   userPhoto: $("#user-photo"),
   menuToggle: $("#menu-toggle"),
+  langToggle: $("#lang-toggle"),
 };
+
+// ---------------------------------------------------------------------------
+// i18n — UI language. Chinese Simplified (zh) is the default; an English (en)
+//   toggle lives in the sidebar footer. Static markup carries data-i18n /
+//   data-i18n-html / data-i18n-ph / data-i18n-al / data-i18n-title attributes
+//   that applyI18n() fills; dynamic strings are read via tr(key, …args).
+// ---------------------------------------------------------------------------
+const I18N = {
+  zh: {
+    "skip": "跳到消息输入框",
+    "login.tagline": '由 <strong>DeepSeek&nbsp;v4&nbsp;Pro</strong> 驱动的 AI 助手，支持实时联网搜索。',
+    "login.google": "使用 Google 继续",
+    "login.foot": "你的对话将安全地保存到你的账户。",
+    "nav.newChat": "新对话",
+    "search.ph": "搜索对话…",
+    "search.al": "搜索对话",
+    "nav.memory": "记忆",
+    "nav.signout": "退出登录",
+    "head.menu": "切换侧栏",
+    "head.exportAl": "导出对话为 Markdown",
+    "head.exportTitle": "导出为 Markdown",
+    "empty.h": "有什么可以帮你？",
+    "empty.p": "尽管问。需要最新信息时我会联网搜索。",
+    "chip.1": "今年太阳能电池板效率有哪些新进展？",
+    "chip.2": "总结今天的 AI 头条新闻",
+    "chip.3": "讲讲钙钛矿太阳能电池的工作原理",
+    "jump.al": "跳到最新",
+    "attach.al": "添加文档",
+    "attach.title": "添加文档（PDF、文本、Markdown…）",
+    "composer.ph": "给 Erosolar 发消息…",
+    "composer.busy": "Erosolar 正在回复…",
+    "composer.al": "给 Erosolar 发消息",
+    "send.al": "发送",
+    "send.stop": "停止生成",
+    "mem.title": "记忆",
+    "mem.close": "关闭",
+    "mem.intro": "Erosolar 在你所有对话中记住的关于你的信息，以及已连接的服务。它会影响它的回答——而你掌握着控制权。",
+    "mem.connections": "连接",
+    "mem.profile": "你的档案",
+    "mem.ci": "自定义指令",
+    "mem.save": "保存",
+    "ci.ph": "对 Erosolar 的长期指引——语气、格式、专业程度、单位等。",
+    "mem.docs": "文档",
+    "mem.upload": "上传",
+    "mem.stored": "已存记忆",
+    "mem.clearAll": "全部清除",
+    "loading": "加载中…",
+    "profileNone": "暂无档案——随着你与它对话，Erosolar 会逐步建立。",
+    "profileErr": "无法加载档案。",
+    "ciSaved": "自定义指令已保存",
+    "signinFail": "登录失败：",
+    "googleSignin": "Google 登录：",
+    "updateFail": "无法更新：",
+    "renameFail": "无法重命名：",
+    "deleteFail": "无法删除：",
+    "connectGoogleFail": "无法连接 Google：",
+    "waitResp": "请等待当前回复完成。",
+    "startConvFail": "无法创建对话：",
+    "clearFail": "无法清除：",
+    "saveFail": "无法保存：",
+    "reasoning": "推理中",
+    "readingPage": "正在读取页面",
+    "searchingWeb": "联网搜索中",
+    "readingContent": "读取页面内容",
+    "readingResults": "读取搜索结果",
+    "writing": "正在撰写答案",
+    "answerReady": "回答已就绪",
+    "wrong": "出了点问题",
+    "errorGeneric": "出错了",
+    "confirm": "确认",
+    "delete": "删除",
+    "thisChat": "此对话",
+    "forgetAll": "忘记所有已存记忆？此操作无法撤销。（不影响你的聊天记录。）",
+    "forgetAllBtn": "全部忘记",
+    "deleteDocConfirm": "删除此文档以及 Erosolar 从中学到的一切？",
+    "noMatch": "没有匹配的对话。",
+    "open": " · 打开",
+    "dismiss": "忽略",
+    "reconnectGoogle": "请先重新连接 Google（打开 记忆 → 连接）。",
+    "working": "处理中…",
+    "sources": "来源",
+    "copy": "复制",
+    "copied": "已复制",
+    "copyFailed": "复制失败",
+    "failed": "失败",
+    "retry": "重试",
+    "cancel": "取消",
+    "send": "发送",
+    "unpin": "取消置顶",
+    "pin": "置顶",
+    "rename": "重命名",
+    "renameConv": "重命名对话",
+    "deleteConv": "删除对话",
+    "responding": "回复中…",
+    "forgetThis": "忘记此条",
+    "deleteDoc": "删除文档",
+    "proposedAction": "建议的操作",
+    "draftOk": "✓ 草稿已保存到 Gmail",
+    "calOk": "✓ 已添加到你的日历",
+    "saveDraft": "保存草稿",
+    "addCal": "添加到日历",
+    "untitled": "未命名",
+    "noSubject": "（无主题）",
+    "connConnected": "● 已连接 Google",
+    "connServices": "日历 · Gmail · 云端硬盘",
+    "disconnect": "断开连接",
+    "connectGoogle": "连接 Google",
+    "connSub": "让 Erosolar 使用你的日历、Gmail 和云端硬盘。仅在你请求时读取，任何草稿或日程都需要你明确确认。连接仅在本次会话内有效。",
+    "stopped": "_已停止。_",
+    "upTooLarge": "文件过大（最大 10 MB）。",
+    "upCantRead": "无法读取该文件。",
+    "upNoText": "该文件中未找到文本。",
+    "upIndexFail": "索引失败：",
+    "docNone": "尚未上传任何文档。",
+    "docLoadErr": "无法加载文档。",
+    "docFallback": "文档",
+    "memListErr": "无法加载记忆。",
+    "memListNone": "暂无已存记忆。",
+    "memNote": (n) => `🧠 引用了你过往对话中的 ${n} 条记忆`,
+    "excerptsIndexed": (n) => `已索引 ${n} 段摘录`,
+    "readingHost": (h) => `正在读取 ${h}`,
+    "searching": (q) => `搜索 · ${q}`,
+    "deleteConvConfirm": (label) => `删除“${label}”？`,
+    "calEvent": (summary, range) => `📅 创建日程：“${summary}”${range}`,
+    "draftTo": (to, subj) => `✉️ 给 ${to} 起草：“${subj}”`,
+    "upReading": (name) => `正在读取 ${name}…`,
+    "upIndexing": (name) => `正在索引 ${name}…`,
+    "upAdded": (name, chunks) => `✓ 已添加 ${name} · ${chunks} 段摘录`,
+  },
+  en: {
+    "skip": "Skip to message input",
+    "login.tagline": 'An AI assistant powered by <strong>DeepSeek&nbsp;v4&nbsp;Pro</strong> with live web search.',
+    "login.google": "Continue with Google",
+    "login.foot": "Your chats are saved securely to your account.",
+    "nav.newChat": "New chat",
+    "search.ph": "Search chats…",
+    "search.al": "Search conversations",
+    "nav.memory": "Memory",
+    "nav.signout": "Sign out",
+    "head.menu": "Toggle sidebar",
+    "head.exportAl": "Export conversation as Markdown",
+    "head.exportTitle": "Export as Markdown",
+    "empty.h": "How can I help?",
+    "empty.p": "Ask anything. I'll search the web when I need current information.",
+    "chip.1": "What's new in solar panel efficiency this year?",
+    "chip.2": "Summarize today's top AI headlines",
+    "chip.3": "Explain how perovskite solar cells work",
+    "jump.al": "Jump to latest",
+    "attach.al": "Attach a document",
+    "attach.title": "Attach a document (PDF, text, markdown…)",
+    "composer.ph": "Message Erosolar…",
+    "composer.busy": "Erosolar is responding…",
+    "composer.al": "Message Erosolar",
+    "send.al": "Send",
+    "send.stop": "Stop generating",
+    "mem.title": "Memory",
+    "mem.close": "Close",
+    "mem.intro": "What Erosolar remembers about you across all your chats, plus connected services. This shapes its answers — you're in control of it.",
+    "mem.connections": "Connections",
+    "mem.profile": "Your profile",
+    "mem.ci": "Custom instructions",
+    "mem.save": "Save",
+    "ci.ph": "Always-on guidance for Erosolar — tone, format, expertise level, units, etc.",
+    "mem.docs": "Documents",
+    "mem.upload": "Upload",
+    "mem.stored": "Stored memories",
+    "mem.clearAll": "Clear all",
+    "loading": "Loading…",
+    "profileNone": "No profile yet — Erosolar builds one as you chat.",
+    "profileErr": "Could not load profile.",
+    "ciSaved": "Custom instructions saved",
+    "signinFail": "Sign-in failed: ",
+    "googleSignin": "Google sign-in: ",
+    "updateFail": "Could not update: ",
+    "renameFail": "Could not rename: ",
+    "deleteFail": "Could not delete: ",
+    "connectGoogleFail": "Could not connect Google: ",
+    "waitResp": "Wait for the current response to finish.",
+    "startConvFail": "Could not start a conversation: ",
+    "clearFail": "Could not clear: ",
+    "saveFail": "Could not save: ",
+    "reasoning": "Reasoning",
+    "readingPage": "Reading page",
+    "searchingWeb": "Searching the web",
+    "readingContent": "Reading page content",
+    "readingResults": "Reading results",
+    "writing": "Writing the answer",
+    "answerReady": "Answer ready",
+    "wrong": "Something went wrong",
+    "errorGeneric": "Error",
+    "confirm": "Confirm",
+    "delete": "Delete",
+    "thisChat": "this chat",
+    "forgetAll": "Forget ALL stored memories? This can't be undone. (Your chat history is not affected.)",
+    "forgetAllBtn": "Forget all",
+    "deleteDocConfirm": "Delete this document and everything Erosolar learned from it?",
+    "noMatch": "No chats match.",
+    "open": " · open",
+    "dismiss": "Dismiss",
+    "reconnectGoogle": "Reconnect Google first (open Memory → Connections).",
+    "working": "Working…",
+    "sources": "Sources",
+    "copy": "Copy",
+    "copied": "Copied",
+    "copyFailed": "Copy failed",
+    "failed": "Failed",
+    "retry": "Retry",
+    "cancel": "Cancel",
+    "send": "Send",
+    "unpin": "Unpin",
+    "pin": "Pin to top",
+    "rename": "Rename",
+    "renameConv": "Rename conversation",
+    "deleteConv": "Delete conversation",
+    "responding": "Responding…",
+    "forgetThis": "Forget this",
+    "deleteDoc": "Delete document",
+    "proposedAction": "Proposed action",
+    "draftOk": "✓ Draft saved to Gmail",
+    "calOk": "✓ Added to your calendar",
+    "saveDraft": "Save draft",
+    "addCal": "Add to calendar",
+    "untitled": "Untitled",
+    "noSubject": "(no subject)",
+    "connConnected": "● Google connected",
+    "connServices": "Calendar · Gmail · Drive",
+    "disconnect": "Disconnect",
+    "connectGoogle": "Connect Google",
+    "connSub": "Let Erosolar use your Calendar, Gmail & Drive. It only reads on request, and any draft or event needs your explicit confirmation. The connection lasts for this session.",
+    "stopped": "_Stopped._",
+    "upTooLarge": "File too large (max 10 MB).",
+    "upCantRead": "Couldn't read that file.",
+    "upNoText": "No text found in that file.",
+    "upIndexFail": "Indexing failed: ",
+    "docNone": "No documents uploaded yet.",
+    "docLoadErr": "Could not load documents.",
+    "docFallback": "document",
+    "memListErr": "Could not load memories.",
+    "memListNone": "No stored memories yet.",
+    "memNote": (n) => `🧠 Drew on ${n} note${n === 1 ? "" : "s"} from your past chats`,
+    "excerptsIndexed": (n) => `${n} excerpt${n === 1 ? "" : "s"} indexed`,
+    "readingHost": (h) => `Reading ${h}`,
+    "searching": (q) => `Searching · ${q}`,
+    "deleteConvConfirm": (label) => `Delete "${label}"?`,
+    "calEvent": (summary, range) => `📅 Create event: "${summary}"${range}`,
+    "draftTo": (to, subj) => `✉️ Draft to ${to}: "${subj}"`,
+    "upReading": (name) => `Reading ${name}…`,
+    "upIndexing": (name) => `Indexing ${name}…`,
+    "upAdded": (name, chunks) => `✓ Added ${name} · ${chunks} excerpt${chunks === 1 ? "" : "s"}`,
+  },
+};
+
+function initialLang() {
+  try {
+    const v = localStorage.getItem("erosolar.lang");
+    if (v === "zh" || v === "en") return v;
+  } catch {}
+  return "zh"; // Chinese Simplified by default
+}
+state.lang = initialLang();
+
+// Translate a key for the active language. Missing keys fall back to English,
+// then to the key itself. Function-valued entries are parameterized.
+function tr(key, ...args) {
+  const table = I18N[state.lang] || I18N.zh;
+  const v = key in table ? table[key] : key in I18N.en ? I18N.en[key] : key;
+  return typeof v === "function" ? v(...args) : v;
+}
+
+// Fill every data-i18n* slot in the static markup for the active language.
+function applyI18n() {
+  document.documentElement.lang = state.lang === "zh" ? "zh-Hans" : "en";
+  document.querySelectorAll("[data-i18n]").forEach((el) => {
+    el.textContent = tr(el.getAttribute("data-i18n"));
+  });
+  document.querySelectorAll("[data-i18n-html]").forEach((el) => {
+    el.innerHTML = tr(el.getAttribute("data-i18n-html"));
+  });
+  document.querySelectorAll("[data-i18n-ph]").forEach((el) => {
+    el.setAttribute("placeholder", tr(el.getAttribute("data-i18n-ph")));
+  });
+  document.querySelectorAll("[data-i18n-al]").forEach((el) => {
+    el.setAttribute("aria-label", tr(el.getAttribute("data-i18n-al")));
+  });
+  document.querySelectorAll("[data-i18n-title]").forEach((el) => {
+    el.setAttribute("title", tr(el.getAttribute("data-i18n-title")));
+  });
+  if (els.langToggle) els.langToggle.textContent = state.lang === "zh" ? "EN" : "中文";
+}
+
+// Flip the UI language, persist it, and re-render the JS-managed surfaces that
+// don't carry data-i18n attributes (composer placeholder, conversation list,
+// and the open memory modal's connections box).
+function setLang(lang) {
+  if ((lang !== "zh" && lang !== "en") || lang === state.lang) return;
+  state.lang = lang;
+  try {
+    localStorage.setItem("erosolar.lang", lang);
+  } catch {}
+  applyI18n();
+  updateComposer();
+  renderConvFiltered();
+  const mm = document.getElementById("memory-modal");
+  if (mm && !mm.hidden) renderConnections();
+  // Known, intentional limitation: surfaces already painted into existing chat
+  // messages (Sources label, Copy buttons, the collapsed reasoning summary,
+  // the 🧠 memory note, action cards) keep their previous-language text until
+  // the next render or a reload. A mid-conversation toggle is a rare, deliberate
+  // action and this self-heals — re-rendering live turns isn't worth the risk.
+  track("set_language", { lang });
+}
+
+if (els.langToggle) {
+  els.langToggle.addEventListener("click", () =>
+    setLang(state.lang === "zh" ? "en" : "zh")
+  );
+}
+applyI18n();
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -241,11 +560,11 @@ function confirmDialog(message, opts = {}) {
     const cancel = document.createElement("button");
     cancel.type = "button";
     cancel.className = "btn-cancel";
-    cancel.textContent = opts.cancelText || "Cancel";
+    cancel.textContent = opts.cancelText || tr("cancel");
     const ok = document.createElement("button");
     ok.type = "button";
     ok.className = "btn-confirm" + (opts.danger ? " danger" : "");
-    ok.textContent = opts.confirmText || "Confirm";
+    ok.textContent = opts.confirmText || tr("confirm");
     row.append(cancel, ok);
     card.append(msg, row);
     overlay.appendChild(card);
@@ -296,7 +615,7 @@ els.googleSignin.addEventListener("click", async () => {
     track("login", { method: "google", via: "popup" });
     if (getAdditionalUserInfo(result)?.isNewUser) track("sign_up", { method: "google" });
   } catch (e) {
-    toast("Sign-in failed: " + (e.message || e.code), "error");
+    toast(tr("signinFail") + (e.message || e.code), "error");
   }
 });
 els.signout.addEventListener("click", () => {
@@ -361,7 +680,7 @@ function renderConvFiltered() {
   if (els.convList.querySelector(".convo-rename-input")) return;
   const term = convSearch;
   const list = (term
-    ? allConvos.filter((c) => (c.title || "New chat").toLowerCase().includes(term))
+    ? allConvos.filter((c) => (c.title || tr("nav.newChat")).toLowerCase().includes(term))
     : allConvos.slice()
   ).sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0));
   renderConvList(list, term);
@@ -371,7 +690,7 @@ async function togglePin(c) {
   try {
     await setDoc(convRef(c.id), { pinned: !c.pinned }, { merge: true });
   } catch (e) {
-    toast("Could not update: " + (e.message || ""), "error");
+    toast(tr("updateFail") + (e.message || ""), "error");
   }
 }
 
@@ -397,7 +716,7 @@ function startRename(row, titleBtn, c) {
         await setDoc(convRef(c.id), { title: newTitle }, { merge: true });
         if (state.activeId === c.id) els.title.textContent = newTitle;
       } catch (e) {
-        toast("Could not rename: " + (e.message || ""), "error");
+        toast(tr("renameFail") + (e.message || ""), "error");
       }
     }
     if (input.isConnected) input.replaceWith(titleBtn);
@@ -417,7 +736,7 @@ function renderConvList(convos, term) {
     if (term) {
       const empty = document.createElement("div");
       empty.className = "convo-empty";
-      empty.textContent = "No chats match.";
+      empty.textContent = tr("noMatch");
       els.convList.appendChild(empty);
     }
     return;
@@ -432,7 +751,7 @@ function renderConvList(convos, term) {
     const title = document.createElement("button");
     title.type = "button";
     title.className = "convo-title";
-    title.textContent = c.title || "New chat";
+    title.textContent = c.title || tr("nav.newChat");
     title.addEventListener("click", (e) => {
       e.stopPropagation();
       selectConversation(c.id, c.title);
@@ -443,14 +762,14 @@ function renderConvList(convos, term) {
     if (state.runs.has(c.id)) {
       const dot = document.createElement("span");
       dot.className = "convo-live";
-      dot.title = "Responding…";
+      dot.title = tr("responding");
       row.appendChild(dot);
     }
 
     const pin = document.createElement("button");
     pin.type = "button";
     pin.className = "convo-act convo-pin" + (c.pinned ? " on" : "");
-    pin.title = c.pinned ? "Unpin" : "Pin to top";
+    pin.title = c.pinned ? tr("unpin") : tr("pin");
     pin.setAttribute("aria-label", pin.title);
     pin.innerHTML =
       '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M14 2l8 8-3 1-3 5 1 3-2 2-4-4-5 5-1-1 5-5-4-4 2-2 3 1 5-3 1-3z"/></svg>';
@@ -463,8 +782,8 @@ function renderConvList(convos, term) {
     const ren = document.createElement("button");
     ren.type = "button";
     ren.className = "convo-act convo-ren";
-    ren.title = "Rename";
-    ren.setAttribute("aria-label", "Rename conversation");
+    ren.title = tr("rename");
+    ren.setAttribute("aria-label", tr("renameConv"));
     ren.innerHTML =
       '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>';
     ren.addEventListener("click", (e) => {
@@ -475,13 +794,13 @@ function renderConvList(convos, term) {
 
     const del = document.createElement("button");
     del.className = "convo-act convo-del";
-    del.title = "Delete conversation";
-    del.setAttribute("aria-label", "Delete conversation");
+    del.title = tr("deleteConv");
+    del.setAttribute("aria-label", tr("deleteConv"));
     del.innerHTML =
       '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg>';
     del.addEventListener("click", (e) => {
       e.stopPropagation();
-      deleteConversation(c.id, c.title || "this chat");
+      deleteConversation(c.id, c.title || tr("thisChat"));
     });
     row.appendChild(del);
 
@@ -497,12 +816,12 @@ document.getElementById("conv-search")?.addEventListener("input", (e) => {
 });
 
 async function deleteConversation(id, label) {
-  if (!(await confirmDialog(`Delete "${label}"?`, { confirmText: "Delete", danger: true }))) return;
+  if (!(await confirmDialog(tr("deleteConvConfirm", label), { confirmText: tr("delete"), danger: true }))) return;
   try {
     await deleteDoc(convRef(id));
     if (state.activeId === id) resetToEmpty();
   } catch (e) {
-    toast("Could not delete: " + e.message, "error");
+    toast(tr("deleteFail") + e.message, "error");
   }
 }
 
@@ -520,8 +839,8 @@ function setSendMode(stop) {
   els.send.type = stop ? "button" : "submit"; // in stop mode the click must NOT submit
   els.send.innerHTML = stop ? STOP_ICON : SEND_ICON;
   els.send.classList.toggle("stop", stop);
-  els.send.setAttribute("aria-label", stop ? "Stop generating" : "Send");
-  els.send.title = stop ? "Stop generating" : "Send";
+  els.send.setAttribute("aria-label", stop ? tr("send.stop") : tr("send.al"));
+  els.send.title = stop ? tr("send.stop") : tr("send.al");
 }
 // Abort the in-flight run for the conversation currently on screen.
 function stopActiveRun() {
@@ -537,7 +856,7 @@ function stopActiveRun() {
 function updateComposer() {
   const busy = activeBusy();
   els.input.disabled = busy;
-  els.input.placeholder = busy ? "Erosolar is responding…" : "Message Erosolar…";
+  els.input.placeholder = busy ? tr("composer.busy") : tr("composer.ph");
   setSendMode(busy);
   els.send.disabled = busy ? false : !els.input.value.trim();
   const exp = document.getElementById("export-chat");
@@ -690,7 +1009,7 @@ function addMessageView(msg) {
     if (msg.streaming) {
       det.open = !msg.content; // open while reasoning; collapsed once the answer began
       det.classList.add("running");
-      setReasonSummary(msg, msg.activityLabel || "Reasoning", true);
+      setReasonSummary(msg, msg.activityLabel || tr("reasoning"), true);
       rbody.textContent = msg.reasoning || "";
       rbody.scrollTop = rbody.scrollHeight;
       updateReasonVisibility(msg);
@@ -763,26 +1082,27 @@ function renderMemoryNote(msg) {
   const n = msg.memoryUsed || 0;
   msg._memoryEl.hidden = n <= 0;
   if (n > 0) {
-    msg._memoryEl.textContent = `🧠 Drew on ${n} note${n === 1 ? "" : "s"} from your past chats`;
+    msg._memoryEl.textContent = tr("memNote", n);
   }
 }
 
 function describeAction(action) {
   const p = action.params || {};
   if (action.kind === "calendar_create") {
-    return `📅 Create event: "${p.summary || "Untitled"}"${p.start ? ` — ${p.start}${p.end ? " → " + p.end : ""}` : ""}`;
+    const range = p.start ? ` — ${p.start}${p.end ? " → " + p.end : ""}` : "";
+    return tr("calEvent", p.summary || tr("untitled"), range);
   }
   if (action.kind === "gmail_draft") {
-    return `✉️ Draft to ${p.to || "?"}: "${p.subject || "(no subject)"}"`;
+    return tr("draftTo", p.to || "?", p.subject || tr("noSubject"));
   }
-  return "Proposed action";
+  return tr("proposedAction");
 }
 
 // Confirm-before-act card: the model proposed a Google action; nothing happens
 // unless the user clicks confirm (this is also the guard against an injected
 // instruction triggering an unwanted action).
 function actionOkText(action) {
-  return action.kind === "gmail_draft" ? "✓ Draft saved to Gmail" : "✓ Added to your calendar";
+  return action.kind === "gmail_draft" ? tr("draftOk") : tr("calOk");
 }
 
 function renderAction(msg, action) {
@@ -807,7 +1127,7 @@ function renderAction(msg, action) {
       a.href = action.resultLink;
       a.target = "_blank";
       a.rel = "noopener noreferrer";
-      a.textContent = " · open";
+      a.textContent = tr("open");
       status.appendChild(a);
     }
     card.appendChild(status);
@@ -819,21 +1139,21 @@ function renderAction(msg, action) {
   btns.className = "action-btns";
   const confirm = document.createElement("button");
   confirm.className = "act-confirm";
-  confirm.textContent = action.kind === "gmail_draft" ? "Save draft" : "Add to calendar";
+  confirm.textContent = action.kind === "gmail_draft" ? tr("saveDraft") : tr("addCal");
   const dismiss = document.createElement("button");
   dismiss.className = "act-dismiss";
-  dismiss.textContent = "Dismiss";
+  dismiss.textContent = tr("dismiss");
 
   confirm.addEventListener("click", async () => {
     if (!googleConnected()) {
       status.className = "action-status error";
-      status.textContent = "Reconnect Google first (open Memory → Connections).";
+      status.textContent = tr("reconnectGoogle");
       return;
     }
     confirm.disabled = true;
     dismiss.disabled = true;
     status.className = "action-status";
-    status.textContent = "Working…";
+    status.textContent = tr("working");
     try {
       const token = await auth.currentUser.getIdToken();
       const params =
@@ -865,7 +1185,7 @@ function renderAction(msg, action) {
         a.href = action.resultLink;
         a.target = "_blank";
         a.rel = "noopener noreferrer";
-        a.textContent = " · open";
+        a.textContent = tr("open");
         status.appendChild(a);
       }
     } catch (e) {
@@ -894,9 +1214,9 @@ function renderConnections() {
   if (!box) return;
   if (googleConnected()) {
     box.innerHTML =
-      '<div class="conn-row"><span class="conn-ok">● Google connected</span>' +
-      '<span class="conn-sub">Calendar · Gmail · Drive</span>' +
-      '<button id="google-disconnect" class="link">Disconnect</button></div>';
+      '<div class="conn-row"><span class="conn-ok">' + tr("connConnected") + "</span>" +
+      '<span class="conn-sub">' + tr("connServices") + "</span>" +
+      '<button id="google-disconnect" class="link">' + tr("disconnect") + "</button></div>";
     box.querySelector("#google-disconnect").addEventListener("click", () => {
       state.googleToken = null;
       state.googleTokenExp = 0;
@@ -904,8 +1224,8 @@ function renderConnections() {
     });
   } else {
     box.innerHTML =
-      '<div class="conn-row"><button id="google-connect" class="btn-connect">Connect Google</button></div>' +
-      '<p class="conn-sub">Let Erosolar use your Calendar, Gmail & Drive. It only reads on request, and any draft or event needs your explicit confirmation. The connection lasts for this session.</p>';
+      '<div class="conn-row"><button id="google-connect" class="btn-connect">' + tr("connectGoogle") + "</button></div>" +
+      '<p class="conn-sub">' + tr("connSub") + "</p>";
     box.querySelector("#google-connect").addEventListener("click", connectGoogle);
   }
 }
@@ -928,7 +1248,7 @@ async function connectGoogle() {
       track("connect_google", { via: "popup" });
     }
   } catch (e) {
-    toast("Could not connect Google: " + (e.message || e.code || ""), "error");
+    toast(tr("connectGoogleFail") + (e.message || e.code || ""), "error");
   }
   renderConnections();
 }
@@ -938,7 +1258,7 @@ function renderSources(msg) {
   msg._sourcesEl.innerHTML = "";
   const label = document.createElement("span");
   label.className = "sources-label";
-  label.textContent = "Sources";
+  label.textContent = tr("sources");
   msg._sourcesEl.appendChild(label);
   msg.sources.forEach((s, i) => {
     const a = document.createElement("a");
@@ -962,19 +1282,19 @@ function addCopyButton(body, getText) {
   const btn = document.createElement("button");
   btn.type = "button";
   btn.className = "copy-btn";
-  btn.innerHTML = COPY_ICON + "<span>Copy</span>";
+  btn.innerHTML = COPY_ICON + "<span>" + tr("copy") + "</span>";
   const label = btn.querySelector("span");
   btn.addEventListener("click", async () => {
     try {
       await navigator.clipboard.writeText(getText() || "");
       btn.classList.add("copied");
-      label.textContent = "Copied";
+      label.textContent = tr("copied");
     } catch {
-      label.textContent = "Copy failed";
+      label.textContent = tr("copyFailed");
     }
     setTimeout(() => {
       btn.classList.remove("copied");
-      label.textContent = "Copy";
+      label.textContent = tr("copy");
     }, 1500);
   });
   row.appendChild(btn);
@@ -1002,7 +1322,7 @@ function retryTurn(failedMsg) {
   if (i >= 0) state.messages.splice(i, 1);
   const aMsg = {
     role: "assistant", content: "", reasoning: "", sources: [],
-    streaming: true, convId, activityLabel: "Reasoning",
+    streaming: true, convId, activityLabel: tr("reasoning"),
   };
   const run = {
     convId, userMsg: { role: "user", content: text }, aMsg,
@@ -1030,7 +1350,7 @@ function renderError(msg) {
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = "retry-btn";
-    btn.textContent = "Retry";
+    btn.textContent = tr("retry");
     btn.addEventListener("click", () => retryTurn(msg));
     box.appendChild(btn);
   }
@@ -1076,15 +1396,15 @@ function enhanceCodeBlocks(root) {
       const btn = document.createElement("button");
       btn.type = "button";
       btn.className = "code-copy";
-      btn.textContent = "Copy";
+      btn.textContent = tr("copy");
       btn.addEventListener("click", async () => {
         try {
           await navigator.clipboard.writeText(code.textContent || "");
-          btn.textContent = "Copied";
+          btn.textContent = tr("copied");
         } catch {
-          btn.textContent = "Failed";
+          btn.textContent = tr("failed");
         }
-        setTimeout(() => (btn.textContent = "Copy"), 1500);
+        setTimeout(() => (btn.textContent = tr("copy")), 1500);
       });
       wrap.appendChild(btn);
     }
@@ -1151,7 +1471,7 @@ function regenerateTurn(assistantMsg) {
   if (idx >= 0) state.messages.splice(idx).forEach((m) => m._el && m._el.remove());
   const aMsg = {
     role: "assistant", content: "", reasoning: "", sources: [],
-    streaming: true, convId, activityLabel: "Reasoning",
+    streaming: true, convId, activityLabel: tr("reasoning"),
   };
   const run = {
     convId, userMsg: { role: "user", content: "" }, aMsg,
@@ -1204,7 +1524,7 @@ function submitEdit(userMsg, newText) {
   els.messages.querySelectorAll(".retry-btn, .regen-btn").forEach((b) => b.remove());
   const aMsg = {
     role: "assistant", content: "", reasoning: "", sources: [],
-    streaming: true, convId, activityLabel: "Reasoning",
+    streaming: true, convId, activityLabel: tr("reasoning"),
   };
   const run = {
     convId, userMsg: { role: "user", content: newText }, aMsg,
@@ -1235,11 +1555,11 @@ function startEditMessage(userMsg) {
   const cancel = document.createElement("button");
   cancel.type = "button";
   cancel.className = "edit-cancel";
-  cancel.textContent = "Cancel";
+  cancel.textContent = tr("cancel");
   const send = document.createElement("button");
   send.type = "button";
   send.className = "edit-send";
-  send.textContent = "Send";
+  send.textContent = tr("send");
   actions.append(cancel, send);
   contentEl.textContent = "";
   contentEl.append(ta, actions);
@@ -1258,7 +1578,7 @@ function startEditMessage(userMsg) {
     // (a response is mid-flight), restore the bubble so the editor isn't stranded.
     if (!submitEdit(userMsg, newText)) {
       restore();
-      if (typeof toast === "function") toast("Wait for the current response to finish.");
+      if (typeof toast === "function") toast(tr("waitResp"));
     }
   };
   cancel.addEventListener("click", restore);
@@ -1299,7 +1619,7 @@ function finalizeAssistant(msg) {
     msg._reasonDetails.classList.remove("running");
   }
   if (msg._reasonBody) msg._reasonBody.textContent = (msg.reasoning || "").trim();
-  setReasonSummary(msg, "Reasoning", false);
+  setReasonSummary(msg, tr("reasoning"), false);
   updateReasonVisibility(msg);
   renderMemoryNote(msg);
   paintAssistant(msg);
@@ -1317,7 +1637,7 @@ function finalizeAssistant(msg) {
 async function ensureConversation() {
   if (state.activeId) return state.activeId;
   const ref = await addDoc(userColRef(), {
-    title: "New chat",
+    title: tr("nav.newChat"),
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   });
@@ -1334,7 +1654,7 @@ async function sendMessage(text) {
   try {
     convId = await ensureConversation();
   } catch (e) {
-    toast("Could not start a conversation: " + e.message, "error");
+    toast(tr("startConvFail") + e.message, "error");
     return;
   }
   track("message_sent", { length: text.length });
@@ -1347,7 +1667,7 @@ async function sendMessage(text) {
     sources: [],
     streaming: true,
     convId,
-    activityLabel: "Reasoning",
+    activityLabel: tr("reasoning"),
   };
   const run = { convId, userMsg, aMsg, controller: new AbortController() };
   state.runs.set(convId, run);
@@ -1415,7 +1735,7 @@ async function streamRun(run, text) {
     if (run.stopped || err.name === "AbortError") {
       // User hit Stop — keep whatever streamed in; mark an empty turn as stopped.
       aMsg.stopped = true;
-      if (!aMsg.content.trim()) aMsg.content = "_Stopped._";
+      if (!aMsg.content.trim()) aMsg.content = tr("stopped");
     } else {
       // Recoverable error. Only offer Retry when NOTHING streamed: once answer
       // content has begun, a mid-stream disconnect means the server best-effort-
@@ -1444,9 +1764,9 @@ function handleEvent(run, ev) {
     case "reasoning":
       // The streamed reasoning log IS the live display (no "Thinking" placeholder).
       msg.reasoning += ev.delta || "";
-      msg.activityLabel = "Reasoning";
+      msg.activityLabel = tr("reasoning");
       if (visible) {
-        setReasonSummary(msg, "Reasoning", true);
+        setReasonSummary(msg, tr("reasoning"), true);
         appendReason(msg, ev.delta || "");
         updateReasonVisibility(msg);
       }
@@ -1460,12 +1780,12 @@ function handleEvent(run, ev) {
             .map((u) => hostOf(u.trim()))
             .filter(Boolean)
             .join(", ");
-          msg.activityLabel = hosts ? `Reading ${truncate(hosts, 56)}` : "Reading page";
+          msg.activityLabel = hosts ? tr("readingHost", truncate(hosts, 56)) : tr("readingPage");
         } else {
-          msg.activityLabel = ev.query ? `Searching · ${truncate(ev.query, 56)}` : "Searching the web";
+          msg.activityLabel = ev.query ? tr("searching", truncate(ev.query, 56)) : tr("searchingWeb");
         }
       } else {
-        msg.activityLabel = isExtract ? "Reading page content" : "Reading results";
+        msg.activityLabel = isExtract ? tr("readingContent") : tr("readingResults");
       }
       if (visible) {
         setReasonSummary(msg, msg.activityLabel, true);
@@ -1476,12 +1796,12 @@ function handleEvent(run, ev) {
     case "content": {
       // Stream the answer live, as soon as tokens arrive.
       const firstToken = !msg.content;
-      if (firstToken) msg.activityLabel = "Writing the answer";
+      if (firstToken) msg.activityLabel = tr("writing");
       msg.content += ev.delta || "";
       if (visible) {
         // Auto-collapse the reasoning log once the answer starts streaming.
         if (firstToken && msg._reasonDetails) msg._reasonDetails.open = false;
-        if (firstToken) announce("Writing the answer");
+        if (firstToken) announce(tr("writing"));
         setReasonSummary(msg, msg.activityLabel, true);
         scheduleContentRender(msg);
       }
@@ -1514,13 +1834,13 @@ function handleEvent(run, ev) {
         run.userMsg.id = ev.userMessageId;
         if (visible) addEditButton(run.userMsg);
       }
-      if (visible) announce("Answer ready");
+      if (visible) announce(tr("answerReady"));
       break;
     case "error":
-      msg.error = ev.message || "Error";
+      msg.error = ev.message || tr("errorGeneric");
       msg._retryText = run.userMsg.content; // preserve the prompt for one-click Retry
       msg._retryRewind = run.rewind; // …and the rewind, so Retry re-runs the edit/regen (not a new turn)
-      if (visible) announce("Something went wrong");
+      if (visible) announce(tr("wrong"));
       break;
   }
 }
@@ -1534,7 +1854,7 @@ function refreshConvLiveDot(convId) {
   if (running && !existing) {
     const dot = document.createElement("span");
     dot.className = "convo-live";
-    dot.title = "Responding…";
+    dot.title = tr("responding");
     const t = row.querySelector(".convo-title"); // sit right after the title, matching the full render
     if (t) t.after(dot);
     else row.appendChild(dot);
@@ -1647,8 +1967,8 @@ async function openMemory() {
   renderConnections();
   loadDocuments();
   memEls.profile.className = "profile-box";
-  memEls.profile.textContent = "Loading…";
-  memEls.list.innerHTML = '<div class="mem-empty">Loading…</div>';
+  memEls.profile.textContent = tr("loading");
+  memEls.list.innerHTML = '<div class="mem-empty">' + tr("loading") + "</div>";
 
   try {
     const snap = await getDoc(doc(db, "users", state.user.uid));
@@ -1659,11 +1979,11 @@ async function openMemory() {
       memEls.profile.innerHTML = renderMarkdown(profile);
     } else {
       memEls.profile.className = "profile-box empty";
-      memEls.profile.textContent = "No profile yet — Erosolar builds one as you chat.";
+      memEls.profile.textContent = tr("profileNone");
     }
   } catch {
     memEls.profile.className = "profile-box empty";
-    memEls.profile.textContent = "Could not load profile.";
+    memEls.profile.textContent = tr("profileErr");
   }
 
   try {
@@ -1672,13 +1992,13 @@ async function openMemory() {
     );
     renderMemoryList(snap.docs);
   } catch (e) {
-    memEls.list.innerHTML = '<div class="mem-empty">Could not load memories.</div>';
+    memEls.list.innerHTML = '<div class="mem-empty">' + tr("memListErr") + "</div>";
     console.error("memory list", e);
   }
 }
 
 function memEmpty() {
-  memEls.list.innerHTML = '<div class="mem-empty">No stored memories yet.</div>';
+  memEls.list.innerHTML = '<div class="mem-empty">' + tr("memListNone") + "</div>";
 }
 
 function renderMemoryList(docs) {
@@ -1714,7 +2034,7 @@ function renderMemoryList(docs) {
 
     const del = document.createElement("button");
     del.className = "mem-del";
-    del.title = "Forget this";
+    del.title = tr("forgetThis");
     del.innerHTML =
       '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg>';
     del.addEventListener("click", async () => {
@@ -1725,7 +2045,7 @@ function renderMemoryList(docs) {
         if (!memEls.list.children.length) memEmpty();
       } catch (e) {
         del.disabled = false;
-        toast("Could not delete: " + e.message, "error");
+        toast(tr("deleteFail") + e.message, "error");
       }
     });
 
@@ -1737,7 +2057,7 @@ function renderMemoryList(docs) {
 
 async function clearAllMemories() {
   if (!state.user) return;
-  if (!(await confirmDialog("Forget ALL stored memories? This can't be undone. (Your chat history is not affected.)", { confirmText: "Forget all", danger: true }))) return;
+  if (!(await confirmDialog(tr("forgetAll"), { confirmText: tr("forgetAllBtn"), danger: true }))) return;
   memEls.clear.disabled = true;
   try {
     for (;;) {
@@ -1750,7 +2070,7 @@ async function clearAllMemories() {
     }
     memEmpty();
   } catch (e) {
-    toast("Could not clear: " + e.message, "error");
+    toast(tr("clearFail") + e.message, "error");
   } finally {
     memEls.clear.disabled = false;
   }
@@ -1808,23 +2128,23 @@ async function extractText(file) {
 async function ingestFile(file) {
   if (!state.user) return;
   if (file.size > 10 * 1024 * 1024) {
-    showUpload("File too large (max 10 MB).", "error");
+    showUpload(tr("upTooLarge"), "error");
     return hideUploadLater(4000);
   }
-  showUpload(`Reading ${truncate(file.name, 40)}…`, "busy");
+  showUpload(tr("upReading", truncate(file.name, 40)), "busy");
   let text = "";
   try {
     text = await extractText(file);
   } catch (e) {
     console.error("extract", e);
-    showUpload("Couldn't read that file.", "error");
+    showUpload(tr("upCantRead"), "error");
     return hideUploadLater(4000);
   }
   if (!text || !text.trim()) {
-    showUpload("No text found in that file.", "error");
+    showUpload(tr("upNoText"), "error");
     return hideUploadLater(4000);
   }
-  showUpload(`Indexing ${truncate(file.name, 40)}…`, "busy");
+  showUpload(tr("upIndexing", truncate(file.name, 40)), "busy");
   try {
     const token = await auth.currentUser.getIdToken();
     const resp = await fetch(apiBase + "/api/ingest", {
@@ -1840,25 +2160,25 @@ async function ingestFile(file) {
       // send a sentinel rather than leaking the name's first chars into GA4.
       type: file.name.includes(".") ? file.name.split(".").pop().toLowerCase().slice(0, 8) : "none",
     });
-    showUpload(`✓ Added ${truncate(file.name, 40)} · ${data.chunks} excerpt${data.chunks === 1 ? "" : "s"}`, "ok");
+    showUpload(tr("upAdded", truncate(file.name, 40), data.chunks), "ok");
     hideUploadLater(5000);
     const modal = document.getElementById("memory-modal");
     if (modal && !modal.hidden) loadDocuments();
   } catch (e) {
     track("document_upload_failed");
-    showUpload("Indexing failed: " + e.message, "error");
+    showUpload(tr("upIndexFail") + e.message, "error");
     hideUploadLater(5000);
   }
 }
 
 async function loadDocuments() {
-  upEls.docList.innerHTML = '<div class="mem-empty">Loading…</div>';
+  upEls.docList.innerHTML = '<div class="mem-empty">' + tr("loading") + "</div>";
   try {
     const snap = await getDocs(
       query(collection(db, "users", state.user.uid, "documents"), orderBy("createdAt", "desc"))
     );
     if (snap.empty) {
-      upEls.docList.innerHTML = '<div class="mem-empty">No documents uploaded yet.</div>';
+      upEls.docList.innerHTML = '<div class="mem-empty">' + tr("docNone") + "</div>";
       return;
     }
     upEls.docList.innerHTML = "";
@@ -1870,15 +2190,15 @@ async function loadDocuments() {
       main.className = "mem-main";
       const t = document.createElement("div");
       t.className = "mem-text";
-      t.textContent = data.filename || "document";
+      t.textContent = data.filename || tr("docFallback");
       const meta = document.createElement("div");
       meta.className = "mem-meta";
-      meta.textContent = `${data.chunks || 0} excerpt${data.chunks === 1 ? "" : "s"} indexed`;
+      meta.textContent = tr("excerptsIndexed", data.chunks || 0);
       main.appendChild(t);
       main.appendChild(meta);
       const del = document.createElement("button");
       del.className = "mem-del";
-      del.title = "Delete document";
+      del.title = tr("deleteDoc");
       del.innerHTML =
         '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg>';
       del.addEventListener("click", () => deleteDocument(d.id, item, del));
@@ -1887,13 +2207,13 @@ async function loadDocuments() {
       upEls.docList.appendChild(item);
     });
   } catch (e) {
-    upEls.docList.innerHTML = '<div class="mem-empty">Could not load documents.</div>';
+    upEls.docList.innerHTML = '<div class="mem-empty">' + tr("docLoadErr") + "</div>";
     console.error("docs", e);
   }
 }
 
 async function deleteDocument(docId, item, del) {
-  if (!(await confirmDialog("Delete this document and everything Erosolar learned from it?", { confirmText: "Delete", danger: true }))) return;
+  if (!(await confirmDialog(tr("deleteDocConfirm"), { confirmText: tr("delete"), danger: true }))) return;
   del.disabled = true;
   try {
     for (;;) {
@@ -1909,10 +2229,10 @@ async function deleteDocument(docId, item, del) {
     await deleteDoc(doc(db, "users", state.user.uid, "documents", docId));
     item.remove();
     if (!upEls.docList.children.length)
-      upEls.docList.innerHTML = '<div class="mem-empty">No documents uploaded yet.</div>';
+      upEls.docList.innerHTML = '<div class="mem-empty">' + tr("docNone") + "</div>";
   } catch (e) {
     del.disabled = false;
-    toast("Could not delete: " + e.message, "error");
+    toast(tr("deleteFail") + e.message, "error");
   }
 }
 
@@ -2000,8 +2320,8 @@ document.getElementById("ci-save")?.addEventListener("click", async () => {
   if (!ci) return;
   try {
     await setDoc(doc(db, "users", state.user.uid), { customInstructions: ci.value.trim().slice(0, 2000) }, { merge: true });
-    toast("Custom instructions saved");
+    toast(tr("ciSaved"));
   } catch (e) {
-    toast("Could not save: " + (e.message || ""), "error");
+    toast(tr("saveFail") + (e.message || ""), "error");
   }
 });
